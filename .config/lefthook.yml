@@ -1,0 +1,47 @@
+pre-commit:
+  parallel: true
+  commands:
+    ruff-check:
+      glob: "*.py"
+      run: uv run ruff check {staged_files}
+    ruff-format:
+      glob: "*.py"
+      run: uv run ruff format --check {staged_files}
+    markdownlint:
+      glob: "*.md"
+      run: markdownlint-cli2 --config .config/markdownlint.jsonc {staged_files}
+    yamllint:
+      glob: "*.{yml,yaml}"
+      run: yamllint -c .config/yamllint.yml {staged_files}
+    taplo-check:
+      glob: "*.toml"
+      run: taplo check --config .config/taplo.toml {staged_files}
+    json-check:
+      glob: "*.json"
+      run: 'python3 -c "import json,sys; [json.load(open(f)) for f in sys.argv[1:]]" {staged_files}'
+    shellcheck:
+      glob: "*.sh"
+      run: shellcheck {staged_files}
+    hadolint:
+      glob: "Dockerfile*"
+      run: hadolint {staged_files}
+    actionlint:
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: actionlint {staged_files}
+    gitleaks:
+      run: gitleaks protect --staged --verbose
+
+commit-msg:
+  commands:
+    commitlint:
+      run: commitlint --config .config/commitlint.yml --edit {1}
+
+pre-push:
+  parallel: true
+  commands:
+    pytest:
+      run: uv run pytest tests/unit/ tests/integration/
+    mypy:
+      run: uv run mypy src/
+    pip-audit:
+      run: uv run pip-audit
