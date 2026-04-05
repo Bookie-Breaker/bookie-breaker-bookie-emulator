@@ -1,0 +1,10 @@
+{
+  // Allow long lines (one sentence per line can be long)
+  "MD013": false,
+  // Allow duplicate headings in different sections
+  "MD024": { "siblings_only": true },
+  // Allow inline HTML (for badges, images with attributes)
+  "MD033": false,
+  // Allow bare URLs
+  "MD034": false
+}
