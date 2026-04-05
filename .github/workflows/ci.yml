@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: Bookie-Breaker/bookie-breaker-infra-ops/.github/workflows/python-ci.yml@main
+    secrets: inherit
+
+  docker:
+    needs: ci
+    if: github.ref == 'refs/heads/main'
+    uses: Bookie-Breaker/bookie-breaker-infra-ops/.github/workflows/docker-build.yml@main
+    with:
+      image-name: bookie-emulator
+    secrets: inherit
