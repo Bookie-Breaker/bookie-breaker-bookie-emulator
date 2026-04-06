@@ -1,3 +1,5 @@
+rc: .config/lefthookrc
+
 pre-commit:
   parallel: true
   commands:
