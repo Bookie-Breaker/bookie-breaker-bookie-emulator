@@ -1,0 +1,4 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>Bookie-Breaker/bookie-breaker-infra-ops//renovate-config.json"]
+}

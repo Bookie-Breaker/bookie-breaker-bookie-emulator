@@ -1,0 +1,25 @@
+[project]
+description = "Paper trading system for tracking prediction performance"
+name = "bookie-emulator"
+requires-python = ">=3.12"
+version = "0.1.0"
+
+[dependency-groups]
+dev = ["ruff", "mypy", "pytest", "pytest-cov", "pip-audit"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
