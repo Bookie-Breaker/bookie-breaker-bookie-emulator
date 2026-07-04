@@ -15,7 +15,7 @@ tasks:
   dev:
     desc: "Run with hot reload"
     cmds:
-      - uv run uvicorn src.bookie_emulator.main:app --reload --port 8005
+      - uv run uvicorn --app-dir src bookie_emulator.main:app --reload --port 8005
 
   lint:
     desc: "Run linters"
@@ -32,3 +32,26 @@ tasks:
     desc: "Run type checker"
     cmds:
       - uv run mypy src/
+
+  db:migrate:
+    desc: "Apply Alembic migrations to the emulator schema"
+    cmds:
+      - uv run alembic upgrade head
+
+  # committed artifacts are prettier-formatted (docs repo pre-commit), so
+  # both tasks normalize through prettier before writing/diffing
+  spec:export:
+    desc: "Export the generated OpenAPI spec to the docs repo (ADR-021)"
+    cmds:
+      - uv run python scripts/export_openapi.py --out
+        ../bookie-breaker-docs/api-contracts/openapi/bookie-emulator.yaml
+      - prettier --config ../bookie-breaker-docs/.config/prettierrc.json --write
+        ../bookie-breaker-docs/api-contracts/openapi/bookie-emulator.yaml
+
+  spec:check:
+    desc: "Verify the committed OpenAPI artifact matches the served spec"
+    cmds:
+      - defer: rm -f .spec-check.yaml
+      - uv run python scripts/export_openapi.py --out .spec-check.yaml
+      - prettier --config ../bookie-breaker-docs/.config/prettierrc.json --write .spec-check.yaml
+      - diff .spec-check.yaml ../bookie-breaker-docs/api-contracts/openapi/bookie-emulator.yaml

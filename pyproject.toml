@@ -1,11 +1,38 @@
 [project]
+dependencies = [
+  "alembic>=1.14",
+  "asyncpg>=0.30",
+  "fastapi>=0.115",
+  "httpx>=0.28",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.29",
+  "opentelemetry-instrumentation-fastapi>=0.50b0",
+  "opentelemetry-instrumentation-httpx>=0.50b0",
+  "opentelemetry-instrumentation-sqlalchemy>=0.50b0",
+  "opentelemetry-sdk>=1.29",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "redis>=5.2",
+  "sqlalchemy[asyncio]>=2.0.36",
+  "uvicorn[standard]>=0.34",
+]
 description = "Paper trading system for tracking prediction performance"
 name = "bookie-emulator"
 requires-python = ">=3.12"
 version = "0.1.0"
 
 [dependency-groups]
-dev = ["ruff", "mypy", "pytest", "pytest-cov", "pip-audit"]
+dev = [
+  "ruff",
+  "mypy",
+  "pytest",
+  "pytest-asyncio",
+  "pytest-cov",
+  "pip-audit",
+  "pyyaml",
+  "respx",
+  "testcontainers[postgres,redis]",
+  "types-pyyaml",
+]
 
 [tool.ruff]
 line-length = 120
@@ -20,6 +47,12 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 
+[[tool.mypy.overrides]]
+ignore_missing_imports = true
+module = ["opentelemetry.instrumentation.*"]
+
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+asyncio_default_fixture_loop_scope = "session"
+asyncio_mode = "auto"
+pythonpath = ["src", "."]
 testpaths = ["tests"]
