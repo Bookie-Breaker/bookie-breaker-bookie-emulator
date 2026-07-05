@@ -15,12 +15,14 @@ task up  # from BookieBreaker/ root
 ```bash
 cp .env.example .env  # fill in values
 task bootstrap
+task db:migrate       # apply Alembic migrations to the emulator schema
 task dev
 ```
 
 ## API
 
-API documentation available at `http://localhost:8005/docs` when running.
+API documentation available at `http://localhost:8005/docs` when running. The exported OpenAPI artifact lives in
+`bookie-breaker-docs/api-contracts/openapi/bookie-emulator.yaml` (regenerate with `task spec:export`).
 
 ## Architecture Decisions
 

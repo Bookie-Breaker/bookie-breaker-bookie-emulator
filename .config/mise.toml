@@ -1,6 +1,7 @@
 [tools]
 "aqua:evilmartians/lefthook" = "latest"
 "aqua:hadolint/hadolint" = "latest"
+"aqua:jessfraz/dockfmt" = "latest"
 "aqua:koalaman/shellcheck" = "latest"
 "aqua:rhysd/actionlint" = "latest"
 "aqua:tamasfe/taplo" = "latest"
