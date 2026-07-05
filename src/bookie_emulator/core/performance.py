@@ -53,6 +53,17 @@ class PerformanceMetrics:
 
 
 @dataclass(frozen=True)
+class CalibrationBin:
+    """One reliability-diagram bucket over settled (WON/LOST) bets."""
+
+    lower: float  # inclusive
+    upper: float  # exclusive; the last bin includes 1.0
+    bet_count: int
+    avg_predicted_probability: float | None  # None when bet_count == 0
+    actual_win_rate: float | None  # None when bet_count == 0
+
+
+@dataclass(frozen=True)
 class BreakdownGroup:
     group: str
     total_bets: int
@@ -105,23 +116,43 @@ def brier_score(bets: Sequence[GradedBet]) -> float | None:
     return sum((b.predicted_probability - (1.0 if b.status == "WON" else 0.0)) ** 2 for b in settled) / len(settled)
 
 
-def expected_calibration_error(bets: Sequence[GradedBet], n_bins: int = 10) -> float | None:
-    """10-bin expected calibration error over WON/LOST bets."""
+def calibration_bins(bets: Sequence[GradedBet], n_bins: int = 10) -> list[CalibrationBin]:
+    """Equal-width predicted-probability buckets over WON/LOST bets.
+
+    Always returns n_bins bins; empty buckets carry count 0 and None stats.
+    """
     settled = [b for b in bets if b.status in _SETTLED]
-    if not settled:
-        return None
-    bins: list[list[GradedBet]] = [[] for _ in range(n_bins)]
+    buckets: list[list[GradedBet]] = [[] for _ in range(n_bins)]
     for bet in settled:
         index = min(int(bet.predicted_probability * n_bins), n_bins - 1)
-        bins[index].append(bet)
-    error = 0.0
-    for contents in bins:
-        if not contents:
-            continue
-        confidence = sum(b.predicted_probability for b in contents) / len(contents)
-        accuracy = sum(1.0 for b in contents if b.status == "WON") / len(contents)
-        error += (len(contents) / len(settled)) * abs(accuracy - confidence)
-    return error
+        buckets[index].append(bet)
+    bins: list[CalibrationBin] = []
+    for i, contents in enumerate(buckets):
+        confidence = _mean([b.predicted_probability for b in contents])
+        accuracy = sum(1.0 for b in contents if b.status == "WON") / len(contents) if contents else None
+        bins.append(
+            CalibrationBin(
+                lower=i / n_bins,
+                upper=(i + 1) / n_bins,
+                bet_count=len(contents),
+                avg_predicted_probability=confidence,
+                actual_win_rate=accuracy,
+            )
+        )
+    return bins
+
+
+def expected_calibration_error(bets: Sequence[GradedBet], n_bins: int = 10) -> float | None:
+    """n-bin expected calibration error over WON/LOST bets, derived from calibration_bins."""
+    bins = calibration_bins(bets, n_bins)
+    total = sum(b.bet_count for b in bins)
+    if not total:
+        return None
+    return sum(
+        (b.bet_count / total) * abs(b.actual_win_rate - b.avg_predicted_probability)
+        for b in bins
+        if b.bet_count and b.actual_win_rate is not None and b.avg_predicted_probability is not None
+    )
 
 
 def _mean(values: Sequence[float]) -> float | None:

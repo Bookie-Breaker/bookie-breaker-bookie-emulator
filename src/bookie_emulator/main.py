@@ -46,7 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         bet_repo = PaperBetRepository(engine)
         bankroll_repo = BankrollRepository(engine)
-        grader = GraderService(statistics, lines, bet_repo, settings)
+        grader = GraderService(statistics, lines, bet_repo, settings, redis_client=redis_client)
         subscriber = GameCompletedSubscriber(redis_client, grader)
         poller = GradingPoller(
             statistics,

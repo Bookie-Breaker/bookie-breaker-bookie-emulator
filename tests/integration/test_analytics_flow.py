@@ -168,6 +168,56 @@ class TestPerformance:
         assert response.json()["data"]["total_bets"] == 0
 
 
+class TestCalibration:
+    def test_calibration_bins_hand_computed(self, client, seeded_mlb) -> None:
+        response = client.get("/api/v1/emulator/performance/calibration", params={"league": "MLB"})
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["n_bins"] == 10
+        assert data["total_graded"] == 3
+        assert len(data["bins"]) == 10
+        # p=0.55 LOSS lands in [.5,.6); p=0.60 WIN and p=0.65 LOSS in [.6,.7)
+        fifties = data["bins"][5]
+        assert (fifties["lower"], fifties["upper"]) == (0.5, 0.6)
+        assert fifties["bet_count"] == 1
+        assert fifties["avg_predicted_probability"] == pytest.approx(0.55)
+        assert fifties["actual_win_rate"] == 0.0
+        sixties = data["bins"][6]
+        assert sixties["bet_count"] == 2
+        assert sixties["avg_predicted_probability"] == pytest.approx(0.625)
+        assert sixties["actual_win_rate"] == pytest.approx(0.5)
+        assert data["bins"][0]["bet_count"] == 0
+        assert data["bins"][0]["avg_predicted_probability"] is None
+        # ECE = 1/3*|0-0.55| + 2/3*|0.5-0.625|
+        assert data["calibration_error"] == pytest.approx(0.55 / 3 + (2 / 3) * 0.125, abs=1e-6)
+        brier = (0.40**2 + 0.55**2 + 0.65**2) / 3
+        assert data["brier_score"] == pytest.approx(brier, abs=1e-4)
+        assert data["period"]["window"] == "all_time"
+
+    def test_custom_bin_count(self, client, seeded_mlb) -> None:
+        response = client.get("/api/v1/emulator/performance/calibration", params={"league": "MLB", "bins": 5})
+        data = response.json()["data"]
+        assert data["n_bins"] == 5
+        assert len(data["bins"]) == 5
+        assert data["bins"][2]["bet_count"] == 1  # [.4,.6): 0.55
+        assert data["bins"][3]["bet_count"] == 2  # [.6,.8): 0.60, 0.65
+
+    def test_bins_bounds_validated(self, client) -> None:
+        assert client.get("/api/v1/emulator/performance/calibration", params={"bins": 1}).status_code == 400
+        assert client.get("/api/v1/emulator/performance/calibration", params={"bins": 21}).status_code == 400
+
+    def test_empty_window_returns_null_stats(self, client, seeded_mlb) -> None:
+        response = client.get(
+            "/api/v1/emulator/performance/calibration",
+            params={"league": "MLB", "date_to": "2020-01-01T00:00:00Z"},
+        )
+        data = response.json()["data"]
+        assert data["total_graded"] == 0
+        assert data["brier_score"] is None
+        assert data["calibration_error"] is None
+        assert all(b["bet_count"] == 0 for b in data["bins"])
+
+
 class TestBreakdown:
     def test_group_by_league_contains_mlb_group(self, client, seeded_mlb) -> None:
         response = client.get("/api/v1/emulator/performance/breakdown", params={"group_by": "league"})

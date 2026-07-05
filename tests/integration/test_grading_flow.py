@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import pytest
 import redis as sync_redis
+import redis.asyncio as aioredis
 from httpx import Response
 
 from bookie_emulator.clients.lines import LinesClient
@@ -40,6 +41,17 @@ def mock_closing(router: Any, ext_id: str) -> None:
     router.get(f"{LINES_URL}/api/v1/lines/game/{ext_id}/closing").mock(
         return_value=Response(200, json=enveloped(closing_lines_payload(ext_id)))
     )
+
+
+def wait_for_message(pubsub: Any, timeout: float = 10.0) -> dict[str, Any] | None:
+    """Poll a pubsub until a data message arrives; a single get_message call
+    can return None after merely consuming the subscribe confirmation."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        message = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
+        if message is not None:
+            return message
+    return None
 
 
 class TestManualGrading:
@@ -98,6 +110,33 @@ class TestManualGrading:
         assert snapshots, "expected a snapshot from the grading transaction"
         assert snapshots[-1]["total_bets"] >= 1
 
+    def test_manual_grade_publishes_bet_graded_event(self, client, upstream, redis_url) -> None:
+        game_id, ext_id, bet_id = self._place(client, upstream)
+        mock_final_game(upstream, game_id, 112, 104)
+        mock_closing(upstream, ext_id)
+
+        redis_client = sync_redis.Redis.from_url(redis_url, decode_responses=True)
+        pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
+        pubsub.subscribe("events:bet.graded")
+        try:
+            assert client.post(f"/api/v1/emulator/bets/{bet_id}/grade", json={}).status_code == 200
+            message = wait_for_message(pubsub)
+            assert message is not None, "no bet.graded event received"
+            payload = json.loads(message["data"])
+            assert payload["event"] == "bet.graded"
+            assert payload["bet_id"] == bet_id
+            assert payload["game_id"] == game_id
+            assert payload["league"] == "NBA"
+            assert payload["market_type"] == "SPREAD"
+            assert payload["result"] == "WIN"
+            assert payload["stake"] == pytest.approx(1.5)
+            assert payload["profit_loss"] == pytest.approx(1.5 * (1.952 - 1.0), abs=1e-3)
+            assert payload["clv"] == pytest.approx(0.03318, abs=1e-4)
+            assert payload["timestamp"].endswith("Z")
+        finally:
+            pubsub.close()
+            redis_client.close()
+
     def test_regrade_conflicts_without_force_and_regrades_with_force(self, client, upstream) -> None:
         game_id, ext_id, bet_id = self._place(client, upstream)
         mock_final_game(upstream, game_id, 112, 104)
@@ -140,7 +179,9 @@ class TestEventDrivenGrading:
             "margin": 8,
             "overtime": False,
         }
-        redis_client = sync_redis.Redis.from_url(redis_url)
+        redis_client = sync_redis.Redis.from_url(redis_url, decode_responses=True)
+        pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
+        pubsub.subscribe("events:bet.graded")
         deadline = time.monotonic() + 15.0
         data = None
         while time.monotonic() < deadline:
@@ -150,13 +191,21 @@ class TestEventDrivenGrading:
                 data = detail
                 break
             time.sleep(0.25)
-        redis_client.close()
 
         assert data is not None, "bet was never graded from the event"
         assert data["result"] == "WIN"
         assert data["grade"]["result_description"] == "LAL won by 8, covering -3.5"
         assert data["grade"]["game_result_id"] is None  # event path has no stats result id
         assert data["clv"] == pytest.approx(0.03318, abs=1e-4)
+
+        # the event-driven grade also fans out a bet.graded event
+        graded_event = wait_for_message(pubsub)
+        pubsub.close()
+        redis_client.close()
+        assert graded_event is not None, "no bet.graded event received"
+        graded_payload = json.loads(graded_event["data"])
+        assert graded_payload["bet_id"] == bet_id
+        assert graded_payload["result"] == "WIN"
 
 
 class TestPoller:
@@ -216,6 +265,59 @@ class TestPoller:
             assert await poller.run_once() == 0
         finally:
             await http_client.aclose()
+            await engine.dispose()
+
+    async def test_grading_succeeds_when_event_publish_fails(self, migrated_database_url, upstream) -> None:
+        """A broken Redis must never block grading: publish is fire-and-forget."""
+        engine = create_engine(migrated_database_url)
+        repo = PaperBetRepository(engine)
+        game_id = uuid.uuid4()
+        ext_id = f"odds-{uuid.uuid4().hex}"
+        bet, created = await repo.insert_idempotent(
+            {
+                "game_id": game_id,
+                "game_external_id": ext_id,
+                "league": "NBA",
+                "market_type": "SPREAD",
+                "selection": "Los Angeles Lakers -3.5",
+                "side": "HOME",
+                "line_value": -3.5,
+                "sportsbook_id": None,
+                "sportsbook_key": "pinnacle",
+                "odds_american": -105,
+                "odds_decimal": 1.952,
+                "stake": 1.0,
+                "predicted_probability": 0.55,
+                "edge_at_placement": 0.042,
+                "kelly_fraction": 0.25,
+                "reasoning": None,
+                "prediction_id": None,
+                "edge_id": None,
+                "idempotency_key": str(uuid.uuid4()),
+                "game_start_at": datetime.now(tz=UTC) - timedelta(hours=4),
+            }
+        )
+        assert created
+        mock_final_game(upstream, str(game_id), 112, 104)
+        upstream.get(f"{LINES_URL}/api/v1/lines/game/{ext_id}/closing").mock(return_value=Response(500))
+
+        # port 1 is unroutable: every publish raises, and must be swallowed
+        dead_redis = aioredis.Redis.from_url("redis://127.0.0.1:1", socket_connect_timeout=0.2)
+        http_client = httpx.AsyncClient()
+        grader = GraderService(
+            StatisticsClient(STATS_URL, http_client),
+            LinesClient(LINES_URL, http_client),
+            repo,
+            Settings(starting_bankroll_units=100.0),
+            redis_client=dead_redis,
+        )
+        try:
+            assert await grader.grade_game(str(game_id), 112, 104) == 1
+            found = await repo.get_with_grade(bet.id)
+            assert found is not None and found[0].status == "WON"
+        finally:
+            await http_client.aclose()
+            await dead_redis.aclose()
             await engine.dispose()
 
     async def test_run_once_survives_stats_failures(self, migrated_database_url, upstream) -> None:
