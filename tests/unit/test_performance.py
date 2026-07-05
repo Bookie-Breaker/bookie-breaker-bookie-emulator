@@ -7,6 +7,7 @@ import pytest
 from bookie_emulator.core.performance import (
     GradedBet,
     brier_score,
+    calibration_bins,
     compute_breakdown,
     compute_performance,
     expected_calibration_error,
@@ -158,6 +159,63 @@ class TestPureHelpers:
         ]
         # bin .7-.8: |0.5 - 0.75| = 0.25 (weight 1/2); bin .5-.6: |1.0 - 0.55| = 0.45 (weight 1/2)
         assert expected_calibration_error(bets) == pytest.approx(0.35)
+
+
+class TestCalibrationBins:
+    def test_bin_stats_hand_computed(self) -> None:
+        bets = [
+            bet("WON", 1, predicted_probability=0.75),
+            bet("LOST", 2, predicted_probability=0.79),
+            bet("WON", 3, predicted_probability=0.55),
+        ]
+        bins = calibration_bins(bets)
+        assert len(bins) == 10
+        seventies = bins[7]
+        assert (seventies.lower, seventies.upper) == (0.7, 0.8)
+        assert seventies.bet_count == 2
+        assert seventies.avg_predicted_probability == pytest.approx(0.77)
+        assert seventies.actual_win_rate == pytest.approx(0.5)
+        fifties = bins[5]
+        assert fifties.bet_count == 1
+        assert fifties.actual_win_rate == pytest.approx(1.0)
+
+    def test_empty_bins_have_null_stats(self) -> None:
+        bins = calibration_bins([bet("WON", 1, predicted_probability=0.55)])
+        assert sum(b.bet_count for b in bins) == 1
+        empty = bins[0]
+        assert empty.bet_count == 0
+        assert empty.avg_predicted_probability is None
+        assert empty.actual_win_rate is None
+
+    def test_no_bets_returns_all_empty_bins(self) -> None:
+        bins = calibration_bins([])
+        assert len(bins) == 10
+        assert all(b.bet_count == 0 for b in bins)
+
+    def test_probability_one_lands_in_last_bin(self) -> None:
+        bins = calibration_bins([bet("WON", 1, predicted_probability=1.0)])
+        assert bins[9].bet_count == 1
+
+    def test_pushes_and_voids_excluded(self) -> None:
+        bins = calibration_bins([bet("PUSH", 1), bet("VOID", 2), bet("WON", 3)])
+        assert sum(b.bet_count for b in bins) == 1
+
+    def test_custom_bin_count_edges(self) -> None:
+        bins = calibration_bins([bet("WON", 1, predicted_probability=0.55)], n_bins=4)
+        assert len(bins) == 4
+        assert (bins[2].lower, bins[2].upper) == (0.5, 0.75)
+        assert bins[2].bet_count == 1
+
+    def test_ece_matches_bins_derivation(self) -> None:
+        bets = sample_bets()
+        bins = calibration_bins(bets)
+        total = sum(b.bet_count for b in bins)
+        expected = sum(
+            (b.bet_count / total) * abs(b.actual_win_rate - b.avg_predicted_probability)
+            for b in bins
+            if b.actual_win_rate is not None and b.avg_predicted_probability is not None
+        )
+        assert expected_calibration_error(bets) == pytest.approx(expected)
 
 
 class TestBreakdown:

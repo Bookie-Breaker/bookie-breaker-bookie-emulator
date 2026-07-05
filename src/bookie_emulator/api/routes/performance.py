@@ -11,6 +11,8 @@ from bookie_emulator.api.routes.bets import as_utc
 from bookie_emulator.api.schemas import (
     BreakdownData,
     BreakdownEntry,
+    CalibrationBinData,
+    CalibrationData,
     GroupBy,
     League,
     MarketType,
@@ -19,7 +21,14 @@ from bookie_emulator.api.schemas import (
     Window,
 )
 from bookie_emulator.config import Settings
-from bookie_emulator.core.performance import GradedBet, compute_breakdown, compute_performance
+from bookie_emulator.core.performance import (
+    GradedBet,
+    brier_score,
+    calibration_bins,
+    compute_breakdown,
+    compute_performance,
+    expected_calibration_error,
+)
 from bookie_emulator.db.repository import BetGradeRecord, LedgerFilters, PaperBetRecord, PaperBetRepository, utc_now
 
 router = APIRouter(tags=["performance"])
@@ -97,6 +106,45 @@ async def get_performance(
             longest_loss_streak=metrics.longest_loss_streak,
             brier_score=metrics.brier_score,
             calibration_error=metrics.calibration_error,
+        )
+    )
+
+
+@router.get("/performance/calibration", response_model=Envelope[CalibrationData])
+async def get_calibration(
+    repo: RepoDep,
+    league: Annotated[League | None, Query(description="Filter by league.")] = None,
+    market_type: Annotated[MarketType | None, Query(description="Filter by market type.")] = None,
+    date_from: Annotated[datetime | None, Query(description="Start date (ISO 8601) on placed_at.")] = None,
+    date_to: Annotated[datetime | None, Query(description="End date (ISO 8601) on placed_at.")] = None,
+    window: Annotated[Window, Query(description="Rolling window applied to graded_at.")] = "all_time",
+    bins: Annotated[int, Query(ge=2, le=20, description="Number of equal-width probability bins.")] = 10,
+) -> Envelope[CalibrationData]:
+    """Reliability-diagram bins over settled bets (predicted probability vs actual win rate).
+
+    All bins are always returned; empty bins carry a zero count and null stats.
+    ECE and Brier are noisy at low volume — consumers should surface total_graded.
+    """
+    now = utc_now()
+    graded_from = now - _WINDOW_SPANS[window] if window != "all_time" else None
+    filters = LedgerFilters(
+        league=league,
+        market_type=market_type,
+        date_from=as_utc(date_from),
+        date_to=as_utc(date_to),
+        graded_from=graded_from,
+    )
+    graded = _to_graded(await repo.graded_bets(filters))
+    computed = calibration_bins(graded, n_bins=bins)
+    period_from = filters.date_from or graded_from or (min(b.placed_at for b in graded) if graded else None)
+    return envelope(
+        CalibrationData(
+            period=PeriodData(from_=period_from, to=filters.date_to or now, window=window),
+            n_bins=bins,
+            total_graded=sum(b.bet_count for b in computed),
+            brier_score=brier_score(graded),
+            calibration_error=expected_calibration_error(graded, n_bins=bins),
+            bins=[CalibrationBinData(**vars(b)) for b in computed],
         )
     )
 

@@ -210,6 +210,23 @@ class BreakdownData(BaseModel):
     breakdowns: list[BreakdownEntry]
 
 
+class CalibrationBinData(BaseModel):
+    lower: float
+    upper: float
+    bet_count: int
+    avg_predicted_probability: float | None
+    actual_win_rate: float | None
+
+
+class CalibrationData(BaseModel):
+    period: PeriodData
+    n_bins: int
+    total_graded: int
+    brier_score: float | None
+    calibration_error: float | None
+    bins: list[CalibrationBinData]
+
+
 class BankrollConfigData(BaseModel):
     max_bet_units: float
     max_daily_exposure_units: float
