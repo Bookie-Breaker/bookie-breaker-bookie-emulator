@@ -91,11 +91,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         },
         license_info={"name": "MIT", "url": "https://opensource.org/licenses/MIT"},
         servers=[{"url": "http://localhost:8005", "description": "Local development"}],
+        # alphabetical by name: the docs repo's Spectral ruleset requires it
         openapi_tags=[
-            {"name": "bets", "description": "Place, list, inspect, and manually grade paper bets."},
-            {"name": "performance", "description": "Aggregate and grouped performance metrics."},
             {"name": "bankroll", "description": "Bankroll state and snapshot history."},
+            {"name": "bets", "description": "Place, list, inspect, and manually grade paper bets."},
             {"name": "health", "description": "Service health, dependencies, and bet stats."},
+            {"name": "performance", "description": "Aggregate and grouped performance metrics."},
         ],
         lifespan=lifespan,
     )
