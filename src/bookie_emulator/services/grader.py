@@ -9,6 +9,8 @@ import logging
 import uuid
 from typing import Any
 
+import redis.asyncio as aioredis
+
 from bookie_emulator.api.errors import DuplicateResourceError, NotFoundError, UnprocessableError
 from bookie_emulator.clients.lines import LinesClient, LineSnapshot
 from bookie_emulator.clients.statistics import StatisticsClient
@@ -16,6 +18,7 @@ from bookie_emulator.config import Settings
 from bookie_emulator.core.clv import compute_clv, match_closing_line
 from bookie_emulator.core.grading import grade_bet, profit_loss
 from bookie_emulator.db.repository import BetGradeRecord, PaperBetRecord, PaperBetRepository
+from bookie_emulator.events.publisher import publish_bet_graded
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +30,13 @@ class GraderService:
         lines: LinesClient,
         repo: PaperBetRepository,
         settings: Settings,
+        redis_client: "aioredis.Redis | None" = None,
     ) -> None:
         self._statistics = statistics
         self._lines = lines
         self._repo = repo
         self._settings = settings
+        self._redis = redis_client
 
     async def grade_game(
         self,
@@ -137,9 +142,14 @@ class GraderService:
             grade_values["closing_line_value"] = closing.line_value
             grade_values["closing_odds"] = closing.odds_american
             grade_values["clv"] = compute_clv(bet.odds_american, closing.odds_american)
-        return await self._repo.apply_grade(
+        applied = await self._repo.apply_grade(
             bet.id, status, grade_values, self._settings.starting_bankroll_units, force=force
         )
+        # apply_grade's transaction has committed once it returns; a force
+        # re-grade republishes, which consumers treat as latest-state.
+        if applied and self._redis is not None:
+            await publish_bet_graded(self._redis, bet, status, grade_values)
+        return applied
 
     async def _fetch_closing(self, game_external_id: str) -> list[LineSnapshot]:
         try:
