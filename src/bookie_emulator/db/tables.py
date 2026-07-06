@@ -32,7 +32,7 @@ metadata = MetaData(schema="emulator")
 # SQLAlchemy can bind and validate parameters (the types are NOT created by
 # this service).
 _ENUM_VALUES: dict[str, tuple[str, ...]] = {
-    "league_enum": ("NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB"),
+    "league_enum": ("NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB", "FIFA_WC", "EPL", "NHL", "NCAA_HKY"),
     "market_type_enum": ("SPREAD", "TOTAL", "MONEYLINE", "PLAYER_PROP", "TEAM_PROP", "GAME_PROP", "FUTURE", "LIVE"),
     "bet_result_enum": ("OPEN", "WON", "LOST", "PUSH", "VOID"),
 }
@@ -76,7 +76,7 @@ paper_bets = Table(
     Column("placed_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")),
     Column("graded_at", TIMESTAMP(timezone=True)),
     UniqueConstraint("idempotency_key", name="uq_paper_bets_idempotency_key"),
-    CheckConstraint("side IN ('HOME', 'AWAY', 'OVER', 'UNDER')", name="chk_paper_bets_side"),
+    CheckConstraint("side IN ('HOME', 'AWAY', 'DRAW', 'OVER', 'UNDER')", name="chk_paper_bets_side"),
     CheckConstraint("stake > 0", name="chk_paper_bets_stake_positive"),
     CheckConstraint(
         "predicted_probability > 0 AND predicted_probability < 1",

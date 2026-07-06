@@ -27,13 +27,36 @@ from tests.integration.conftest import (
     final_game_payload,
     mock_best_lines,
     mock_scheduled_game,
+    mock_soccer_best_lines,
     place_bet,
 )
 
 
-def mock_final_game(router: Any, game_id: str, home: int, away: int, result_id: str | None = None) -> None:
+def mock_final_game(
+    router: Any,
+    game_id: str,
+    home: int,
+    away: int,
+    result_id: str | None = None,
+    league: str = "NBA",
+    regulation_home_score: int | None = None,
+    regulation_away_score: int | None = None,
+) -> None:
     router.get(f"{STATS_URL}/api/v1/stats/games/{game_id}").mock(
-        return_value=Response(200, json=enveloped(final_game_payload(game_id, home, away, result_id=result_id)))
+        return_value=Response(
+            200,
+            json=enveloped(
+                final_game_payload(
+                    game_id,
+                    home,
+                    away,
+                    result_id=result_id,
+                    league=league,
+                    regulation_home_score=regulation_home_score,
+                    regulation_away_score=regulation_away_score,
+                )
+            ),
+        )
     )
 
 
@@ -359,6 +382,117 @@ class TestPoller:
         )
         try:
             assert await poller.run_once() == 0  # logged, not raised
+        finally:
+            await http_client.aclose()
+            await engine.dispose()
+
+
+def soccer_moneyline_values(game_id: uuid.UUID, ext_id: str, side: str, selection: str) -> dict[str, Any]:
+    return {
+        "game_id": game_id,
+        "game_external_id": ext_id,
+        "league": "FIFA_WC",
+        "market_type": "MONEYLINE",
+        "selection": selection,
+        "side": side,
+        "line_value": None,
+        "sportsbook_id": None,
+        "sportsbook_key": "betmgm",
+        "odds_american": 230,
+        "odds_decimal": 3.3,
+        "stake": 1.0,
+        "predicted_probability": 0.35,
+        "edge_at_placement": 0.042,
+        "kelly_fraction": 0.25,
+        "reasoning": None,
+        "prediction_id": None,
+        "edge_id": None,
+        "idempotency_key": str(uuid.uuid4()),
+        "game_start_at": datetime.now(tz=UTC) - timedelta(hours=4),
+    }
+
+
+class TestSoccerThreeWayGrading:
+    """ADR-026/027: DRAW bets, three-way grading, regulation-score settlement."""
+
+    def test_event_grades_draw_bet_on_regulation_score(self, client, upstream, redis_url) -> None:
+        game_id = str(uuid.uuid4())
+        ext_id = f"odds-{uuid.uuid4().hex}"
+        mock_scheduled_game(upstream, game_id, league="FIFA_WC")
+        mock_soccer_best_lines(upstream, ext_id)
+        mock_closing(upstream, ext_id)
+        placed = place_bet(client, game_id, ext_id, market_type="MONEYLINE", selection="Draw", side="DRAW")
+        assert placed.status_code == 201, placed.text
+        bet_id = placed.json()["data"]["id"]
+
+        # 2-2 after 90 minutes, 3-2 after extra time: the DRAW bet WINS
+        payload = {
+            "event": "game.completed",
+            "timestamp": "2026-07-05T22:15:00Z",
+            "game_id": game_id,
+            "game_external_id": ext_id,
+            "league": "FIFA_WC",
+            "home_team": "ARG",
+            "away_team": "FRA",
+            "home_score": 3,
+            "away_score": 2,
+            "total": 5,
+            "margin": 1,
+            "overtime": True,
+            "regulation_home_score": 2,
+            "regulation_away_score": 2,
+        }
+        redis_client = sync_redis.Redis.from_url(redis_url, decode_responses=True)
+        deadline = time.monotonic() + 15.0
+        data = None
+        while time.monotonic() < deadline:
+            redis_client.publish("events:game.completed", json.dumps(payload))
+            detail = client.get(f"/api/v1/emulator/bets/{bet_id}").json()["data"]
+            if detail["result"] != "PENDING":
+                data = detail
+                break
+            time.sleep(0.25)
+        redis_client.close()
+
+        assert data is not None, "bet was never graded from the event"
+        assert data["result"] == "WIN"
+        grade = data["grade"]
+        assert grade["actual_home_score"] == 2  # regulation, not final
+        assert grade["actual_away_score"] == 2
+        assert grade["actual_margin"] == 0
+        assert grade["actual_total"] == 4
+        assert grade["result_description"] == "Game tied"
+
+    async def test_poller_tie_wins_draw_and_loses_home_without_push(self, migrated_database_url, upstream) -> None:
+        engine = create_engine(migrated_database_url)
+        repo = PaperBetRepository(engine)
+        game_id = uuid.uuid4()
+        ext_id = f"odds-{uuid.uuid4().hex}"
+        # the DRAW insert exercises the widened chk_paper_bets_side constraint
+        # and the FIFA_WC league_enum value on a real Postgres
+        draw_bet, created = await repo.insert_idempotent(soccer_moneyline_values(game_id, ext_id, "DRAW", "Draw"))
+        assert created
+        home_bet, created = await repo.insert_idempotent(soccer_moneyline_values(game_id, ext_id, "HOME", "Argentina"))
+        assert created
+
+        # regulation fields absent: settlement falls back to the 2-2 final
+        mock_final_game(upstream, str(game_id), 2, 2, league="FIFA_WC")
+        upstream.get(f"{LINES_URL}/api/v1/lines/game/{ext_id}/closing").mock(return_value=Response(500))
+
+        http_client = httpx.AsyncClient()
+        settings = Settings(starting_bankroll_units=100.0)
+        grader = GraderService(
+            StatisticsClient(STATS_URL, http_client), LinesClient(LINES_URL, http_client), repo, settings
+        )
+        poller = GradingPoller(
+            StatisticsClient(STATS_URL, http_client), repo, grader, poll_seconds=10_000, grace_seconds=10_800
+        )
+        try:
+            assert await poller.run_once() == 2
+            found = await repo.get_with_grade(draw_bet.id)
+            assert found is not None and found[0].status == "WON"
+            found = await repo.get_with_grade(home_bet.id)
+            assert found is not None and found[0].status == "LOST"  # three-way: a tie is not a PUSH
         finally:
             await http_client.aclose()
             await engine.dispose()

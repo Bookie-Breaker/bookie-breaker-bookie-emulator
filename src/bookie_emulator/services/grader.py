@@ -17,10 +17,15 @@ from bookie_emulator.clients.statistics import StatisticsClient
 from bookie_emulator.config import Settings
 from bookie_emulator.core.clv import compute_clv, match_closing_line
 from bookie_emulator.core.grading import grade_bet, profit_loss
+from bookie_emulator.core.settlement import is_three_way_moneyline_league, settlement_scores
 from bookie_emulator.db.repository import BetGradeRecord, PaperBetRecord, PaperBetRepository
 from bookie_emulator.events.publisher import publish_bet_graded
 
 logger = logging.getLogger(__name__)
+
+
+def _or_default(value: int | None, default: int) -> int:
+    return value if value is not None else default
 
 
 class GraderService:
@@ -48,6 +53,8 @@ class GraderService:
         home_team: str | None = None,
         away_team: str | None = None,
         game_result_id: str | None = None,
+        regulation_home_score: int | None = None,
+        regulation_away_score: int | None = None,
     ) -> int:
         """Grade all open bets on a game from final scores. Returns bets graded."""
         bets = await self._repo.open_bets_for_game(uuid.UUID(game_id))
@@ -69,6 +76,8 @@ class GraderService:
                 game_result_id=game_result_id,
                 closing_lines=closing_by_game[bet.game_external_id],
                 force=False,
+                regulation_home_score=regulation_home_score,
+                regulation_away_score=regulation_away_score,
             )
             graded += 1 if applied else 0
         logger.info("graded %d/%d open bets for game %s", graded, len(bets), game_id)
@@ -103,6 +112,8 @@ class GraderService:
             game_result_id=game.result.id,
             closing_lines=await self._fetch_closing(bet.game_external_id),
             force=force,
+            regulation_home_score=game.result.regulation_home_score,
+            regulation_away_score=game.result.regulation_away_score,
         )
         refreshed = await self._repo.get_with_grade(bet_id)
         if refreshed is None:  # pragma: no cover - the bet cannot vanish mid-request
@@ -121,16 +132,41 @@ class GraderService:
         game_result_id: str | None,
         closing_lines: list[LineSnapshot],
         force: bool,
+        regulation_home_score: int | None = None,
+        regulation_away_score: int | None = None,
     ) -> bool:
-        status, description = grade_bet(
-            bet.market_type, bet.side, bet.line_value, home_score, away_score, home_team, away_team
+        settle_home, settle_away = settlement_scores(
+            {
+                "home_score": home_score,
+                "away_score": away_score,
+                "regulation_home_score": regulation_home_score,
+                "regulation_away_score": regulation_away_score,
+            },
+            bet.league,
         )
+        regulation_used = (settle_home, settle_away) != (home_score, away_score)
+        status, description = grade_bet(
+            bet.market_type,
+            bet.side,
+            bet.line_value,
+            settle_home,
+            settle_away,
+            home_team,
+            away_team,
+            three_way_moneyline=is_three_way_moneyline_league(bet.league) and bet.market_type == "MONEYLINE",
+        )
+        if regulation_used:
+            margin_value = settle_home - settle_away
+            total_value = settle_home + settle_away
+        else:
+            margin_value = _or_default(margin, home_score - away_score)
+            total_value = _or_default(total, home_score + away_score)
         grade_values: dict[str, Any] = {
             "actual_result": description,
-            "actual_home_score": home_score,
-            "actual_away_score": away_score,
-            "actual_margin": margin if margin is not None else home_score - away_score,
-            "actual_total": total if total is not None else home_score + away_score,
+            "actual_home_score": settle_home,
+            "actual_away_score": settle_away,
+            "actual_margin": margin_value,
+            "actual_total": total_value,
             "game_result_id": uuid.UUID(game_result_id) if game_result_id else None,
             "profit_loss": profit_loss(status, bet.stake, bet.odds_decimal),
             "closing_line_value": None,

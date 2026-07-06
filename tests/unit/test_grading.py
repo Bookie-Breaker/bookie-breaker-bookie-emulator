@@ -104,6 +104,64 @@ class TestMoneyline:
         assert grade_bet("MONEYLINE", "AWAY", None, 3, 3)[0] == "PUSH"
 
 
+class TestThreeWayMoneyline:
+    """ADR-027 truth table: every side x margin sign, with no push path."""
+
+    @pytest.mark.parametrize(
+        ("side", "home_score", "away_score", "expected"),
+        [
+            ("HOME", 2, 1, "WON"),
+            ("HOME", 1, 2, "LOST"),
+            ("HOME", 1, 1, "LOST"),
+            ("AWAY", 2, 1, "LOST"),
+            ("AWAY", 1, 2, "WON"),
+            ("AWAY", 1, 1, "LOST"),
+            ("DRAW", 2, 1, "LOST"),
+            ("DRAW", 1, 2, "LOST"),
+            ("DRAW", 1, 1, "WON"),
+        ],
+    )
+    def test_truth_table(self, side: str, home_score: int, away_score: int, expected: str) -> None:
+        status, _ = grade_bet("MONEYLINE", side, None, home_score, away_score, three_way_moneyline=True)
+        assert status == expected
+
+    def test_tie_never_pushes_any_side(self) -> None:
+        for side in ("HOME", "AWAY", "DRAW"):
+            status, _ = grade_bet("MONEYLINE", side, None, 0, 0, three_way_moneyline=True)
+            assert status != "PUSH"
+
+    def test_descriptions(self) -> None:
+        status, description = grade_bet("MONEYLINE", "DRAW", None, 2, 2, "ARG", "FRA", three_way_moneyline=True)
+        assert status == "WON"
+        assert description == "Game tied"
+        status, description = grade_bet("MONEYLINE", "HOME", None, 3, 1, "ARG", "FRA", three_way_moneyline=True)
+        assert status == "WON"
+        assert description == "ARG won by 2"
+
+    def test_two_way_tie_still_pushes(self) -> None:
+        # the flag defaults off: existing two-way behavior is untouched
+        assert grade_bet("MONEYLINE", "HOME", None, 3, 3)[0] == "PUSH"
+        assert grade_bet("MONEYLINE", "HOME", None, 3, 3, three_way_moneyline=False)[0] == "PUSH"
+
+
+class TestDrawSideRejection:
+    def test_draw_rejected_on_spread(self) -> None:
+        with pytest.raises(ValueError, match="DRAW"):
+            grade_bet("SPREAD", "DRAW", -0.5, 1, 1)
+
+    def test_draw_rejected_on_total(self) -> None:
+        with pytest.raises(ValueError, match="DRAW"):
+            grade_bet("TOTAL", "DRAW", 2.5, 1, 1)
+
+    def test_draw_rejected_on_two_way_moneyline(self) -> None:
+        with pytest.raises(ValueError, match="DRAW"):
+            grade_bet("MONEYLINE", "DRAW", None, 1, 1)
+
+    def test_draw_rejected_on_spread_even_with_three_way_flag(self) -> None:
+        with pytest.raises(ValueError, match="DRAW"):
+            grade_bet("SPREAD", "DRAW", -0.5, 1, 1, three_way_moneyline=True)
+
+
 class TestUnsupportedMarket:
     def test_prop_market_raises(self) -> None:
         with pytest.raises(ValueError, match="PLAYER_PROP"):

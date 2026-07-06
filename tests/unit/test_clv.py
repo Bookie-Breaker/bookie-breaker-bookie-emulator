@@ -47,6 +47,30 @@ class TestMatchClosingLine:
         match = match_closing_line(closing, "MONEYLINE", "HOME", "pinnacle", None)
         assert match is not None
 
+    def _three_way_closing(self) -> list[LineSnapshot]:
+        return [
+            snapshot("pinnacle", market_type="MONEYLINE", side="HOME", line_value=None),
+            snapshot("pinnacle", market_type="MONEYLINE", side="DRAW", line_value=None),
+            snapshot("pinnacle", market_type="MONEYLINE", side="AWAY", line_value=None),
+        ]
+
+    def test_draw_bet_matches_draw_side_in_three_way_market(self) -> None:
+        match = match_closing_line(self._three_way_closing(), "MONEYLINE", "DRAW", "pinnacle", None)
+        assert match is not None
+        assert match.side == "DRAW"
+
+    def test_home_bet_ignores_draw_row_in_three_way_market(self) -> None:
+        match = match_closing_line(self._three_way_closing(), "MONEYLINE", "HOME", "pinnacle", None)
+        assert match is not None
+        assert match.side == "HOME"
+
+    def test_draw_bet_finds_nothing_in_two_way_market(self) -> None:
+        two_way = [
+            snapshot("pinnacle", market_type="MONEYLINE", side="HOME", line_value=None),
+            snapshot("pinnacle", market_type="MONEYLINE", side="AWAY", line_value=None),
+        ]
+        assert match_closing_line(two_way, "MONEYLINE", "DRAW", "pinnacle", None) is None
+
 
 class TestComputeClv:
     def test_positive_when_market_moved_toward_bet(self) -> None:

@@ -22,6 +22,10 @@ class GameResult(BaseModel):
     total_score: int = 0
     margin: int = 0
     overtime: bool = False
+    # 90-minute regulation scores, populated only for soccer matches that
+    # went to extra time (ADR-027); soccer markets settle on these
+    regulation_home_score: int | None = None
+    regulation_away_score: int | None = None
     completed_at: str = ""
 
 
