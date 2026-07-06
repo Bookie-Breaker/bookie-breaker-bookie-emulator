@@ -52,6 +52,8 @@ class GradingPoller:
                     home_team=game.home_team.abbreviation or game.home_team.name,
                     away_team=game.away_team.abbreviation or game.away_team.name,
                     game_result_id=game.result.id,
+                    regulation_home_score=game.result.regulation_home_score,
+                    regulation_away_score=game.result.regulation_away_score,
                 )
             except asyncio.CancelledError:
                 raise

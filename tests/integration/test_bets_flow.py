@@ -14,6 +14,7 @@ from tests.integration.conftest import (
     iso,
     mock_best_lines,
     mock_scheduled_game,
+    mock_soccer_best_lines,
     place_bet,
 )
 
@@ -137,6 +138,34 @@ class TestPlacement:
             return_value=Response(200, json=enveloped([]))
         )
         assert place_bet(client, game_id, ext_id).status_code == 422
+
+
+class TestDrawPlacement:
+    """DRAW is a valid side only on (three-way) moneylines -- ADR-027."""
+
+    def test_draw_moneyline_bet_accepted_on_soccer_game(self, client, upstream) -> None:
+        game_id = str(uuid.uuid4())
+        ext_id = f"odds-{uuid.uuid4().hex}"
+        mock_scheduled_game(upstream, game_id, league="FIFA_WC")
+        mock_soccer_best_lines(upstream, ext_id)
+
+        response = place_bet(client, game_id, ext_id, market_type="MONEYLINE", selection="Draw", side="DRAW")
+        assert response.status_code == 201, response.text
+        data = response.json()["data"]
+        assert data["side"] == "DRAW"
+        assert data["market_type"] == "MONEYLINE"
+        assert data["odds_american"] == 230  # the DRAW row's odds were captured
+        assert data["result"] == "PENDING"
+
+    def test_draw_rejected_for_spread(self, client, upstream) -> None:
+        response = place_bet(client, str(uuid.uuid4()), "odds-any", market_type="SPREAD", side="DRAW")
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    def test_draw_rejected_for_total(self, client, upstream) -> None:
+        response = place_bet(client, str(uuid.uuid4()), "odds-any", market_type="TOTAL", side="DRAW")
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 class TestLedger:

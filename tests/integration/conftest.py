@@ -29,10 +29,11 @@ LINES_URL = "http://lines.test"
 
 INIT_SQL = """
 CREATE SCHEMA IF NOT EXISTS emulator;
-CREATE TYPE league_enum AS ENUM ('NFL', 'NBA', 'MLB', 'NCAA_FB', 'NCAA_BB', 'NCAA_BSB');
+CREATE TYPE league_enum AS ENUM
+    ('NFL', 'NBA', 'MLB', 'NCAA_FB', 'NCAA_BB', 'NCAA_BSB', 'FIFA_WC', 'EPL', 'NHL', 'NCAA_HKY');
 CREATE TYPE market_type_enum AS ENUM
     ('SPREAD', 'TOTAL', 'MONEYLINE', 'PLAYER_PROP', 'TEAM_PROP', 'GAME_PROP', 'FUTURE', 'LIVE');
-CREATE TYPE sport_enum AS ENUM ('FOOTBALL', 'BASKETBALL', 'BASEBALL');
+CREATE TYPE sport_enum AS ENUM ('FOOTBALL', 'BASKETBALL', 'BASEBALL', 'SOCCER', 'HOCKEY');
 CREATE TYPE bet_result_enum AS ENUM ('OPEN', 'WON', 'LOST', 'PUSH', 'VOID');
 """
 
@@ -133,6 +134,8 @@ def final_game_payload(
     away_score: int,
     league: str = "NBA",
     result_id: str | None = None,
+    regulation_home_score: int | None = None,
+    regulation_away_score: int | None = None,
 ) -> dict[str, Any]:
     payload = game_payload(game_id, league=league, status="FINAL", scheduled_start=iso(datetime.now(tz=UTC)))
     payload["home_score"] = home_score
@@ -146,6 +149,12 @@ def final_game_payload(
         "overtime": False,
         "completed_at": iso(datetime.now(tz=UTC)),
     }
+    # optional regulation-time fields (ADR-027): omitted entirely when absent,
+    # mirroring the statistics-service payload
+    if regulation_home_score is not None:
+        payload["result"]["regulation_home_score"] = regulation_home_score
+    if regulation_away_score is not None:
+        payload["result"]["regulation_away_score"] = regulation_away_score
     return payload
 
 
@@ -186,6 +195,43 @@ def best_lines_payload(ext_id: str) -> list[dict[str, Any]]:
             "sportsbook_id": "00000000-0000-4000-8000-00000000cccc",
             "sportsbook_key": "betmgm",
             "timestamp": "2026-07-04T12:00:00Z",
+        },
+    ]
+
+
+def soccer_best_lines_payload(ext_id: str) -> list[dict[str, Any]]:
+    """Three-outcome moneyline market (ADR-027): HOME, DRAW, and AWAY rows."""
+    common = {
+        "market_type": "MONEYLINE",
+        "line_value": None,
+        "sportsbook_id": "00000000-0000-4000-8000-00000000cccc",
+        "sportsbook_key": "betmgm",
+        "timestamp": "2026-07-05T12:00:00Z",
+    }
+    return [
+        {
+            **common,
+            "selection": "Los Angeles Lakers",
+            "side": "HOME",
+            "best_odds_american": 150,
+            "best_odds_decimal": 2.5,
+            "implied_probability": 0.4,
+        },
+        {
+            **common,
+            "selection": "Draw",
+            "side": "DRAW",
+            "best_odds_american": 230,
+            "best_odds_decimal": 3.3,
+            "implied_probability": 0.303,
+        },
+        {
+            **common,
+            "selection": "Boston Celtics",
+            "side": "AWAY",
+            "best_odds_american": 210,
+            "best_odds_decimal": 3.1,
+            "implied_probability": 0.3226,
         },
     ]
 
@@ -252,6 +298,12 @@ def mock_scheduled_game(router: respx.MockRouter, game_id: str, league: str = "N
 def mock_best_lines(router: respx.MockRouter, ext_id: str) -> None:
     router.get(f"{LINES_URL}/api/v1/lines/game/{ext_id}/best").mock(
         return_value=Response(200, json=enveloped(best_lines_payload(ext_id)))
+    )
+
+
+def mock_soccer_best_lines(router: respx.MockRouter, ext_id: str) -> None:
+    router.get(f"{LINES_URL}/api/v1/lines/game/{ext_id}/best").mock(
+        return_value=Response(200, json=enveloped(soccer_best_lines_payload(ext_id)))
     )
 
 

@@ -58,6 +58,10 @@ class GameReconciler:
         home_name = _normalize(game.home_team.name)
         away_name = _normalize(game.away_team.name)
         for snapshot in snapshots:
+            # three-way moneylines carry DRAW rows whose selection is not a
+            # team name (ADR-027); only HOME/AWAY rows can match by name
+            if snapshot.side not in ("HOME", "AWAY"):
+                continue
             selection = _normalize(snapshot.selection)
             if snapshot.side == "HOME" and selection.startswith(home_name):
                 await self._redis.set(cache_key, snapshot.game_id, ex=self._ttl)

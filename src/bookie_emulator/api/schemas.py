@@ -12,13 +12,13 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from bookie_emulator.db.repository import BankrollSnapshotRecord, BetGradeRecord, PaperBetRecord
 
 MarketType = Literal["SPREAD", "TOTAL", "MONEYLINE"]
-Side = Literal["HOME", "AWAY", "OVER", "UNDER"]
-League = Literal["NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB"]
+Side = Literal["HOME", "AWAY", "DRAW", "OVER", "UNDER"]
+League = Literal["NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB", "FIFA_WC", "EPL", "NHL", "NCAA_HKY"]
 ApiResult = Literal["PENDING", "WIN", "LOSS", "PUSH", "VOID"]
 StatusFilter = Literal["open", "graded", "all"]
 Window = Literal["daily", "weekly", "monthly", "all_time"]
@@ -57,6 +57,13 @@ class PlaceBetRequest(BaseModel):
     stake: float = Field(description="Stake in units. Must fit the available bankroll (checked at placement).")
     kelly_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
     reasoning: str | None = None
+
+    @model_validator(mode="after")
+    def _side_valid_for_market(self) -> "PlaceBetRequest":
+        """DRAW exists only on three-way moneylines (ADR-027)."""
+        if self.side == "DRAW" and self.market_type != "MONEYLINE":
+            raise ValueError(f"Side DRAW is only valid for MONEYLINE markets, not {self.market_type}")
+        return self
 
 
 class GradeRequest(BaseModel):

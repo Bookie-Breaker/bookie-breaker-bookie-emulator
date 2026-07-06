@@ -39,12 +39,19 @@ def grade_bet(
     away_score: int,
     home_team: str | None = None,
     away_team: str | None = None,
+    three_way_moneyline: bool = False,
 ) -> tuple[GradeStatus, str]:
     """Grade a settled market and describe the outcome.
 
     Returns (status, human-readable description), e.g.
     ("WON", "LAL won by 8, covering -3.5").
+
+    ``three_way_moneyline`` selects soccer-style moneyline grading
+    (ADR-027): a tie wins the DRAW side and loses HOME/AWAY -- there is no
+    push path. Side DRAW is only valid on a three-way MONEYLINE.
     """
+    if side == "DRAW" and not (three_way_moneyline and market_type == "MONEYLINE"):
+        raise ValueError(f"Cannot grade side DRAW on a two-way {market_type} market")
     margin = home_score - away_score
     total = home_score + away_score
     selected_margin = margin if side == "HOME" else -margin
@@ -68,8 +75,12 @@ def grade_bet(
         return status, f"Game landed {total}, {relation} {line:g}"
 
     if market_type == "MONEYLINE":
+        summary = _game_summary(home_score, away_score, home_team, away_team)
+        if three_way_moneyline:
+            winner = "HOME" if margin > 0 else "AWAY" if margin < 0 else "DRAW"
+            return ("WON" if side == winner else "LOST"), summary
         status = _settle(selected_margin)
-        return status, _game_summary(home_score, away_score, home_team, away_team)
+        return status, summary
 
     raise ValueError(f"Cannot grade market type {market_type}")
 

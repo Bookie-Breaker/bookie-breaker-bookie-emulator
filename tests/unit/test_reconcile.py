@@ -39,6 +39,17 @@ def make_game() -> Game:
     )
 
 
+def make_soccer_game() -> Game:
+    return Game(
+        id="stats-uuid-2",
+        league="FIFA_WC",
+        status="SCHEDULED",
+        home_team=TeamRef(id="h", name="Argentina"),
+        away_team=TeamRef(id="a", name="France"),
+        scheduled_start="2026-07-10T20:00:00Z",
+    )
+
+
 def snapshot(game_id: str, side: str, selection: str) -> LineSnapshot:
     return LineSnapshot(id="l1", game_id=game_id, side=side, selection=selection, market_type="MONEYLINE")
 
@@ -72,6 +83,24 @@ class TestGameReconciler:
         lines = FakeLines([snapshot("odds-42", "HOME", "LOS ANGELES LAKERS -3.5")])
         reconciler = GameReconciler(lines, FakeRedis())  # type: ignore[arg-type]
         assert await reconciler.resolve(make_game()) == "odds-42"
+
+    async def test_three_way_market_draw_rows_are_skipped(self) -> None:
+        # three-outcome soccer market: the DRAW row precedes the team rows
+        # and must not break name matching (ADR-027)
+        lines = FakeLines(
+            [
+                snapshot("odds-77", "DRAW", "Draw"),
+                snapshot("odds-77", "HOME", "Argentina"),
+                snapshot("odds-77", "AWAY", "France"),
+            ]
+        )
+        reconciler = GameReconciler(lines, FakeRedis())  # type: ignore[arg-type]
+        assert await reconciler.resolve(make_soccer_game()) == "odds-77"
+
+    async def test_draw_only_rows_match_nothing(self) -> None:
+        lines = FakeLines([snapshot("odds-77", "DRAW", "Draw")])
+        reconciler = GameReconciler(lines, FakeRedis())  # type: ignore[arg-type]
+        assert await reconciler.resolve(make_soccer_game()) is None
 
     async def test_lines_failure_returns_none(self) -> None:
         class FailingLines:

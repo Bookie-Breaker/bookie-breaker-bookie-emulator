@@ -68,6 +68,10 @@ class GameCompletedSubscriber:
                 margin=payload.get("margin"),
                 home_team=payload.get("home_team"),
                 away_team=payload.get("away_team"),
+                # optional regulation-time scores (ADR-027): present only when
+                # a soccer match went to extra time; absent means final = settlement
+                regulation_home_score=payload.get("regulation_home_score"),
+                regulation_away_score=payload.get("regulation_away_score"),
             )
             logger.info("game.completed for %s graded %d bets", game_id, graded)
         except asyncio.CancelledError:
