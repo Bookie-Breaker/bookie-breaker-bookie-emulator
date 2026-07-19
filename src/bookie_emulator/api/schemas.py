@@ -14,17 +14,21 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from bookie_emulator.db.repository import BankrollSnapshotRecord, BetGradeRecord, PaperBetRecord
+from bookie_emulator.db.repository import BankrollSnapshotRecord, BetGradeRecord, PaperBetRecord, ParlayLegRecord
 
 MarketType = Literal["SPREAD", "TOTAL", "MONEYLINE", "PLAYER_PROP", "TEAM_PROP", "GAME_PROP"]
 Side = Literal["HOME", "AWAY", "DRAW", "OVER", "UNDER", "YES", "NO"]
+ParlaySide = Literal["HOME", "AWAY", "DRAW", "OVER", "UNDER"]
 PROP_MARKETS: frozenset[str] = frozenset({"PLAYER_PROP", "TEAM_PROP", "GAME_PROP"})
 League = Literal["NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB", "FIFA_WC", "EPL", "NHL", "NCAA_HKY"]
 ApiResult = Literal["PENDING", "WIN", "LOSS", "PUSH", "VOID"]
 StatusFilter = Literal["open", "graded", "all"]
 Window = Literal["daily", "weekly", "monthly", "all_time"]
-GroupBy = Literal["league", "market_type", "sportsbook", "month"]
+GroupBy = Literal["league", "market_type", "sportsbook", "month", "bet_class"]
 HistoryInterval = Literal["per_bet", "daily", "weekly"]
+
+PARLAY_MIN_LEGS = 2
+PARLAY_MAX_LEGS = 6
 
 DB_TO_API_RESULT: dict[str, ApiResult] = {
     "OPEN": "PENDING",
@@ -73,6 +77,41 @@ class PlaceBetRequest(BaseModel):
         if self.market_type in PROP_MARKETS and not self.stat_type:
             raise ValueError(f"{self.market_type} bets require stat_type (ADR-029)")
         return self
+
+
+class ParlayLegRequest(BaseModel):
+    """One leg of a parlay placement (ADR-028). v1 accepts team markets only.
+
+    Business rules with pinned 422 semantics (prop markets, duplicate or
+    opposite-side legs) are enforced in the service layer, not here: pydantic
+    validation surfaces as 400 VALIDATION_ERROR in this API.
+    """
+
+    game_id: uuid.UUID
+    game_external_id: str | None = None
+    market_type: MarketType
+    selection: str
+    side: ParlaySide
+    line_value: float | None = Field(
+        default=None,
+        description="Advisory only: the line captured from lines-service at placement is authoritative.",
+    )
+    sportsbook_key: str | None = None
+
+    @model_validator(mode="after")
+    def _side_valid_for_market(self) -> "ParlayLegRequest":
+        if self.side == "DRAW" and self.market_type != "MONEYLINE":
+            raise ValueError(f"Side DRAW is only valid for MONEYLINE legs, not {self.market_type}")
+        return self
+
+
+class PlaceParlayRequest(BaseModel):
+    legs: list[ParlayLegRequest] = Field(min_length=PARLAY_MIN_LEGS, max_length=PARLAY_MAX_LEGS)
+    predicted_probability: float = Field(gt=0.0, lt=1.0, description="Joint probability of every leg winning.")
+    edge_percentage: float = Field(gt=0.0, description="Edge in percentage points (4.2 = 4.2%).")
+    stake: float = Field(description="Stake in units. Must fit the available bankroll (checked at placement).")
+    kelly_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
+    reasoning: str | None = None
 
 
 class GradeRequest(BaseModel):
@@ -129,6 +168,30 @@ class BetDetailData(BetData):
     closing_line_value: float | None
     closing_odds_american: int | None
     grade: GradeData | None
+
+
+class ParlayLegData(BaseModel):
+    id: uuid.UUID
+    leg_index: int
+    game_id: uuid.UUID | None
+    game_external_id: str
+    league: str
+    market_type: str
+    selection: str
+    side: str | None
+    line_value: float | None
+    odds_american: int
+    odds_decimal: float
+    leg_status: ApiResult
+
+
+class ParlayDetailData(BetDetailData):
+    """A parlay parent with its legs. combined_odds_* mirror the parent's
+    odds fields: the price captured at placement (product of leg decimals)."""
+
+    combined_odds_american: int
+    combined_odds_decimal: float
+    legs: list[ParlayLegData]
 
 
 def bet_to_data(bet: PaperBetRecord, grade: BetGradeRecord | None, unit_size_dollars: float) -> BetData:
@@ -189,6 +252,38 @@ def bet_to_detail(bet: PaperBetRecord, grade: BetGradeRecord | None, unit_size_d
         closing_line_value=grade.closing_line_value if grade is not None else None,
         closing_odds_american=grade.closing_odds if grade is not None else None,
         grade=grade_data,
+    )
+
+
+def leg_to_data(leg: ParlayLegRecord) -> ParlayLegData:
+    return ParlayLegData(
+        id=leg.id,
+        leg_index=leg.leg_index,
+        game_id=leg.game_id,
+        game_external_id=leg.game_external_id,
+        league=leg.league,
+        market_type=leg.market_type,
+        selection=leg.selection,
+        side=leg.side,
+        line_value=leg.line_value,
+        odds_american=leg.odds_american,
+        odds_decimal=leg.odds_decimal,
+        leg_status=DB_TO_API_RESULT[leg.leg_status],
+    )
+
+
+def parlay_to_detail(
+    bet: PaperBetRecord,
+    grade: BetGradeRecord | None,
+    legs: list[ParlayLegRecord],
+    unit_size_dollars: float,
+) -> ParlayDetailData:
+    base = bet_to_detail(bet, grade, unit_size_dollars)
+    return ParlayDetailData(
+        **base.model_dump(),
+        combined_odds_american=bet.odds_american,
+        combined_odds_decimal=bet.odds_decimal,
+        legs=[leg_to_data(leg) for leg in legs],
     )
 
 

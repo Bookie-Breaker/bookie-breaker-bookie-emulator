@@ -36,9 +36,13 @@ class GradingPoller:
     async def run_once(self) -> int:
         """One polling cycle. Returns the number of bets graded."""
         cutoff = utc_now() - timedelta(seconds=self._grace_seconds)
+        # parlay parents carry no game_id and never surface in the first
+        # query; their OPEN legs' games are unioned in (gated on the parent's
+        # earliest leg start) and the FINAL check below filters the rest
         game_ids = await self._repo.open_game_ids_started_before(cutoff)
+        leg_game_ids = await self._repo.open_parlay_leg_game_ids_started_before(cutoff)
         graded = 0
-        for game_id in game_ids:
+        for game_id in dict.fromkeys((*game_ids, *leg_game_ids)):
             try:
                 game = await self._statistics.get_game(str(game_id))
                 if game.status != "FINAL" or game.result is None:

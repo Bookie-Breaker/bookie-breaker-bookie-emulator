@@ -58,6 +58,8 @@ def _to_graded(pairs: list[tuple[PaperBetRecord, BetGradeRecord]]) -> list[Grade
             clv=grade.clv,
             placed_at=bet.placed_at,
             graded_at=grade.graded_at,
+            is_parlay=bet.is_parlay,
+            is_live=bet.is_live,
         )
         for bet, grade in pairs
     ]
@@ -156,7 +158,8 @@ async def get_breakdown(
     date_from: Annotated[datetime | None, Query(description="Start date (ISO 8601) on placed_at.")] = None,
     date_to: Annotated[datetime | None, Query(description="End date (ISO 8601) on placed_at.")] = None,
 ) -> Envelope[BreakdownData]:
-    """Performance broken down by league, market type, sportsbook, or month."""
+    """Performance broken down by league, market type, sportsbook, month, or
+    bet class (single | parlay | prop | live; precedence parlay > prop > live)."""
     filters = LedgerFilters(date_from=as_utc(date_from), date_to=as_utc(date_to))
     graded = _to_graded(await repo.graded_bets(filters))
     groups = compute_breakdown(graded, group_by)
