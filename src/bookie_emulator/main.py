@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from bookie_emulator import __version__
 from bookie_emulator.api.envelope import RequestIDMiddleware
 from bookie_emulator.api.errors import register_error_handlers
-from bookie_emulator.api.routes import bankroll, bets, health, performance
+from bookie_emulator.api.routes import bankroll, bets, health, parlays, performance
 from bookie_emulator.clients.lines import LinesClient
 from bookie_emulator.clients.reconcile import GameReconciler
 from bookie_emulator.clients.statistics import StatisticsClient
@@ -96,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             {"name": "bankroll", "description": "Bankroll state and snapshot history."},
             {"name": "bets", "description": "Place, list, inspect, and manually grade paper bets."},
             {"name": "health", "description": "Service health, dependencies, and bet stats."},
+            {"name": "parlays", "description": "Place and inspect multi-leg parlays."},
             {"name": "performance", "description": "Aggregate and grouped performance metrics."},
         ],
         lifespan=lifespan,
@@ -103,6 +104,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(RequestIDMiddleware)
     register_error_handlers(app)
     app.include_router(bets.router, prefix="/api/v1/emulator")
+    app.include_router(parlays.router, prefix="/api/v1/emulator")
     app.include_router(performance.router, prefix="/api/v1/emulator")
     app.include_router(bankroll.router, prefix="/api/v1/emulator")
     app.include_router(health.router, prefix="/api/v1/emulator")

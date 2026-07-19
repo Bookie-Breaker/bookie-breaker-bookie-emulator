@@ -13,6 +13,9 @@ from bookie_emulator.core.odds import decimal_to_american
 
 _SETTLED = ("WON", "LOST")
 
+# local copy of the prop market values (core stays free of api imports)
+_PROP_MARKETS = frozenset({"PLAYER_PROP", "TEAM_PROP", "GAME_PROP"})
+
 
 @dataclass(frozen=True)
 class GradedBet:
@@ -30,6 +33,24 @@ class GradedBet:
     clv: float | None
     placed_at: datetime
     graded_at: datetime
+    is_parlay: bool = False
+    is_live: bool = False
+
+
+def bet_class(bet: GradedBet) -> str:
+    """Classify a bet as parlay | prop | live | single (Phase 7 Wave 1).
+
+    A parlay parent's market_type mirrors its first leg (the enum has no
+    PARLAY value), so is_parlay is the discriminator and takes precedence:
+    parlay > prop > live > single.
+    """
+    if bet.is_parlay:
+        return "parlay"
+    if bet.market_type in _PROP_MARKETS:
+        return "prop"
+    if bet.is_live:
+        return "live"
+    return "single"
 
 
 @dataclass(frozen=True)
@@ -193,6 +214,7 @@ _GROUP_KEYS: dict[str, Callable[[GradedBet], str]] = {
     "market_type": lambda b: b.market_type,
     "sportsbook": lambda b: b.sportsbook_key,
     "month": lambda b: b.placed_at.strftime("%Y-%m"),
+    "bet_class": bet_class,
 }
 
 

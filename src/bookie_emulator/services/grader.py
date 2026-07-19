@@ -17,8 +17,9 @@ from bookie_emulator.clients.statistics import StatisticsClient
 from bookie_emulator.config import Settings
 from bookie_emulator.core.clv import compute_clv, match_closing_line
 from bookie_emulator.core.grading import grade_bet, profit_loss
+from bookie_emulator.core.parlay import leg_outcome_summary, settle_parlay
 from bookie_emulator.core.settlement import is_three_way_moneyline_league, settlement_scores
-from bookie_emulator.db.repository import BetGradeRecord, PaperBetRecord, PaperBetRepository
+from bookie_emulator.db.repository import BetGradeRecord, PaperBetRecord, PaperBetRepository, ParlayLegRecord
 from bookie_emulator.events.publisher import publish_bet_graded
 
 logger = logging.getLogger(__name__)
@@ -56,9 +57,14 @@ class GraderService:
         regulation_home_score: int | None = None,
         regulation_away_score: int | None = None,
     ) -> int:
-        """Grade all open bets on a game from final scores. Returns bets graded."""
+        """Grade all open bets and parlay legs on a game from final scores.
+
+        Returns single bets graded plus parlay parents settled (legs whose
+        parent still has other games open do not count until it settles).
+        """
         bets = await self._repo.open_bets_for_game(uuid.UUID(game_id))
-        if not bets:
+        legs = await self._repo.open_parlay_legs_for_game(uuid.UUID(game_id))
+        if not bets and not legs:
             return 0
         closing_by_game: dict[str, list[LineSnapshot]] = {}
         graded = 0
@@ -80,8 +86,24 @@ class GraderService:
                 regulation_away_score=regulation_away_score,
             )
             graded += 1 if applied else 0
-        logger.info("graded %d/%d open bets for game %s", graded, len(bets), game_id)
-        return graded
+        settled_parents = await self._grade_parlay_legs(
+            legs,
+            home_score=home_score,
+            away_score=away_score,
+            home_team=home_team,
+            away_team=away_team,
+            regulation_home_score=regulation_home_score,
+            regulation_away_score=regulation_away_score,
+        )
+        logger.info(
+            "graded %d/%d open bets, %d parlay legs (%d parents settled) for game %s",
+            graded,
+            len(bets),
+            len(legs),
+            settled_parents,
+            game_id,
+        )
+        return graded + settled_parents
 
     async def grade_manual(
         self, bet_id: uuid.UUID, force: bool = False
@@ -93,8 +115,23 @@ class GraderService:
         bet, _ = found
         if bet.status != "OPEN" and not force:
             raise DuplicateResourceError(f"Bet {bet_id} is already graded; pass force=true to re-grade")
-        if bet.is_parlay or bet.game_id is None:
-            raise UnprocessableError(f"Bet {bet_id} is a parlay parent; it settles from its legs, not a single game")
+        if bet.is_parlay:
+            # per-leg manual grading is not supported in v1: legs settle via
+            # their games (event or poller); this endpoint (re-)settles the
+            # parent once every leg is decided
+            open_legs = await self._repo.open_leg_count(bet_id)
+            if open_legs:
+                raise UnprocessableError(
+                    f"Parlay {bet_id} still has {open_legs} open legs; "
+                    "legs settle from their games and cannot be graded manually"
+                )
+            await self._settle_parlay_if_decided(bet_id, force=force)
+            refreshed = await self._repo.get_with_grade(bet_id)
+            if refreshed is None:  # pragma: no cover - the bet cannot vanish mid-request
+                raise NotFoundError(f"Bet {bet_id} not found")
+            return refreshed
+        if bet.game_id is None:
+            raise UnprocessableError(f"Bet {bet_id} has no game reference and cannot be graded from a game result")
 
         try:
             game = await self._statistics.get_game(str(bet.game_id))
@@ -187,6 +224,89 @@ class GraderService:
         # re-grade republishes, which consumers treat as latest-state.
         if applied and self._redis is not None:
             await publish_bet_graded(self._redis, bet, status, grade_values)
+        return applied
+
+    async def _grade_parlay_legs(
+        self,
+        legs: list[ParlayLegRecord],
+        home_score: int,
+        away_score: int,
+        home_team: str | None,
+        away_team: str | None,
+        regulation_home_score: int | None = None,
+        regulation_away_score: int | None = None,
+    ) -> int:
+        """Grade OPEN parlay legs for one game via the same market paths as
+        single bets, then settle any parent left with no OPEN legs. Returns
+        the number of parents settled."""
+        parents: dict[uuid.UUID, None] = {}  # insertion-ordered set
+        for leg in legs:
+            settle_home, settle_away = settlement_scores(
+                {
+                    "home_score": home_score,
+                    "away_score": away_score,
+                    "regulation_home_score": regulation_home_score,
+                    "regulation_away_score": regulation_away_score,
+                },
+                leg.league,
+            )
+            try:
+                status, _ = grade_bet(
+                    leg.market_type,
+                    leg.side,
+                    leg.line_value,
+                    settle_home,
+                    settle_away,
+                    home_team,
+                    away_team,
+                    three_way_moneyline=is_three_way_moneyline_league(leg.league) and leg.market_type == "MONEYLINE",
+                )
+            except ValueError:
+                logger.warning("cannot grade parlay leg %s (bet %s)", leg.id, leg.bet_id, exc_info=True)
+                continue
+            if await self._repo.grade_leg(leg.id, status):
+                parents[leg.bet_id] = None
+        settled = 0
+        for parent_id in parents:
+            settled += 1 if await self._settle_parlay_if_decided(parent_id) else 0
+        return settled
+
+    async def _settle_parlay_if_decided(self, bet_id: uuid.UUID, force: bool = False) -> bool:
+        """Settle a parlay parent once no legs remain OPEN (ADR-028).
+
+        WON re-prices over the surviving legs (PUSH/VOID legs contribute 1.0);
+        all legs pushed/voided settles the parent as PUSH (stake refund). The
+        grade row carries no scores (the parent spans games) and no
+        closing/CLV: CLV for parlays is deferred in v1.
+        """
+        if await self._repo.open_leg_count(bet_id) > 0:
+            return False
+        found = await self._repo.get_with_grade(bet_id)
+        if found is None:
+            return False
+        parent, _ = found
+        legs = await self._repo.legs_for_bet(bet_id)
+        settled = settle_parlay([leg.leg_status for leg in legs], [leg.odds_decimal for leg in legs])
+        if settled is None:  # pragma: no cover - a leg reopened between the two reads
+            return False
+        status, repriced = settled
+        grade_values: dict[str, Any] = {
+            "actual_result": leg_outcome_summary([leg.leg_status for leg in legs], status, repriced),
+            "actual_home_score": None,
+            "actual_away_score": None,
+            "actual_margin": None,
+            "actual_total": None,
+            "game_result_id": None,
+            "profit_loss": profit_loss(status, parent.stake, repriced),
+            "closing_line_value": None,
+            "closing_odds": None,
+            "clv": None,
+        }
+        applied = await self._repo.apply_grade(
+            parent.id, status, grade_values, self._settings.starting_bankroll_units, force=force
+        )
+        if applied and self._redis is not None:
+            await publish_bet_graded(self._redis, parent, status, grade_values)
         return applied
 
     async def _fetch_closing(self, game_external_id: str) -> list[LineSnapshot]:

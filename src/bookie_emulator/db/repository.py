@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bookie_emulator.api.pagination import Cursor
-from bookie_emulator.db.tables import bankroll_snapshots, bet_grades, paper_bets
+from bookie_emulator.db.tables import bankroll_snapshots, bet_grades, paper_bets, parlay_legs
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,28 @@ class PaperBetRecord:
     is_parlay: bool = False
     is_live: bool = False
     parent_bet_id: uuid.UUID | None = None
+
+
+@dataclass(frozen=True)
+class ParlayLegRecord:
+    """One leg of a parlay (ADR-028); legs grade independently of the parent."""
+
+    id: uuid.UUID
+    bet_id: uuid.UUID
+    leg_index: int
+    game_id: uuid.UUID | None
+    game_external_id: str
+    league: str
+    market_type: str
+    selection: str
+    side: str | None
+    line_value: float | None
+    odds_american: int
+    odds_decimal: float
+    leg_status: str
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +116,7 @@ class LedgerFilters:
     date_to: datetime | None = None
     min_edge: float | None = None  # fraction, matching edge_at_placement
     graded_from: datetime | None = None
+    is_parlay: bool | None = None  # True: parlay parents only; False: excludes them
 
 
 def _opt_float(value: Any) -> float | None:
@@ -212,7 +235,30 @@ def _filter_conditions(filters: LedgerFilters) -> list[Any]:
         conditions.append(paper_bets.c.edge_at_placement >= filters.min_edge)
     if filters.graded_from is not None:
         conditions.append(paper_bets.c.graded_at >= filters.graded_from)
+    if filters.is_parlay is not None:
+        conditions.append(paper_bets.c.is_parlay == filters.is_parlay)
     return conditions
+
+
+def _leg_from_row(row: Row[Any]) -> ParlayLegRecord:
+    return ParlayLegRecord(
+        id=row.id,
+        bet_id=row.bet_id,
+        leg_index=row.leg_index,
+        game_id=row.game_id,
+        game_external_id=row.game_external_id,
+        league=row.league,
+        market_type=row.market_type,
+        selection=row.selection,
+        side=row.side,
+        line_value=_opt_float(row.line_value),
+        odds_american=row.odds_american,
+        odds_decimal=float(row.odds_decimal),
+        leg_status=row.leg_status,
+        player_external_id=row.player_external_id,
+        stat_type=row.stat_type,
+        prop_type=row.prop_type,
+    )
 
 
 class PaperBetRepository:
@@ -238,6 +284,94 @@ class PaperBetRepository:
         async with self._engine.connect() as conn:
             row = (await conn.execute(existing)).one()
         return _bet_from_row(row), False
+
+    async def insert_parlay(
+        self, parent_values: dict[str, Any], leg_values_list: list[dict[str, Any]]
+    ) -> tuple[PaperBetRecord, list[ParlayLegRecord], bool]:
+        """Insert a parlay parent plus its legs in one transaction.
+
+        Idempotent on the parent's idempotency_key: a replay returns the
+        existing parent and legs without inserting anything (legs are only
+        written when the parent row was actually created).
+        """
+        parent_stmt = (
+            pg_insert(paper_bets)
+            .values(**parent_values)
+            .on_conflict_do_nothing(index_elements=["idempotency_key"])
+            .returning(paper_bets)
+        )
+        async with self._engine.begin() as conn:
+            row = (await conn.execute(parent_stmt)).one_or_none()
+            if row is not None:
+                parent = _bet_from_row(row)
+                legs_stmt = (
+                    insert(parlay_legs)
+                    .values([{**values, "bet_id": parent.id} for values in leg_values_list])
+                    .returning(parlay_legs)
+                )
+                leg_rows = (await conn.execute(legs_stmt)).fetchall()
+                legs = sorted((_leg_from_row(leg_row) for leg_row in leg_rows), key=lambda leg: leg.leg_index)
+                return parent, legs, True
+        existing = select(paper_bets).where(paper_bets.c.idempotency_key == parent_values["idempotency_key"])
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(existing)).one()
+        parent = _bet_from_row(row)
+        return parent, await self.legs_for_bet(parent.id), False
+
+    async def legs_for_bet(self, bet_id: uuid.UUID) -> list[ParlayLegRecord]:
+        stmt = select(parlay_legs).where(parlay_legs.c.bet_id == bet_id).order_by(parlay_legs.c.leg_index.asc())
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).fetchall()
+        return [_leg_from_row(row) for row in rows]
+
+    async def open_parlay_legs_for_game(self, game_id: uuid.UUID) -> list[ParlayLegRecord]:
+        stmt = select(parlay_legs).where(parlay_legs.c.game_id == game_id, parlay_legs.c.leg_status == "OPEN")
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).fetchall()
+        return [_leg_from_row(row) for row in rows]
+
+    async def grade_leg(self, leg_id: uuid.UUID, status: str) -> bool:
+        """Claim-and-grade a leg; False when another grader already settled it."""
+        stmt = (
+            update(parlay_legs)
+            .where(parlay_legs.c.id == leg_id, parlay_legs.c.leg_status == "OPEN")
+            .values(leg_status=status)
+            .returning(parlay_legs.c.id)
+        )
+        async with self._engine.begin() as conn:
+            return (await conn.execute(stmt)).first() is not None
+
+    async def open_leg_count(self, bet_id: uuid.UUID) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(parlay_legs)
+            .where(parlay_legs.c.bet_id == bet_id, parlay_legs.c.leg_status == "OPEN")
+        )
+        async with self._engine.connect() as conn:
+            return int((await conn.execute(stmt)).scalar_one())
+
+    async def open_parlay_leg_game_ids_started_before(self, cutoff: datetime) -> list[uuid.UUID]:
+        """Distinct game ids of OPEN parlay legs eligible for fallback polling.
+
+        Legs carry no start time, so the parent's game_start_at (the EARLIEST
+        leg start) gates the sweep: no leg's game can be final unless the
+        earliest start has passed. The poller still verifies each candidate
+        game is FINAL before grading.
+        """
+        joined = parlay_legs.join(paper_bets, paper_bets.c.id == parlay_legs.c.bet_id)
+        stmt = (
+            select(parlay_legs.c.game_id)
+            .distinct()
+            .select_from(joined)
+            .where(
+                parlay_legs.c.leg_status == "OPEN",
+                parlay_legs.c.game_id.is_not(None),
+                paper_bets.c.game_start_at < cutoff,
+            )
+        )
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).fetchall()
+        return [row.game_id for row in rows]
 
     async def get_with_grade(self, bet_id: uuid.UUID) -> tuple[PaperBetRecord, BetGradeRecord | None] | None:
         stmt = (
