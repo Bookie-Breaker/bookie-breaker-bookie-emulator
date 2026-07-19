@@ -76,6 +76,7 @@ async def list_bets(
     date_to: Annotated[datetime | None, _DATE_TO] = None,
     min_edge: Annotated[float | None, Query(description="Minimum edge percentage.")] = None,
     is_parlay: Annotated[bool | None, Query(description="true for parlay parents only, false to exclude them.")] = None,
+    is_live: Annotated[bool | None, Query(description="true for live bets only, false for pregame only.")] = None,
     status: Annotated[StatusFilter, Query(description="open for pending, graded for completed, or all.")] = "all",
     limit: Annotated[int, Query(ge=1, le=200, description="Max results per page.")] = 50,
     cursor: Annotated[str | None, Query(description="Opaque pagination cursor from a previous page.")] = None,
@@ -90,6 +91,7 @@ async def list_bets(
         date_to=as_utc(date_to),
         min_edge=edge_percent_to_fraction(min_edge) if min_edge is not None else None,
         is_parlay=is_parlay,
+        is_live=is_live,
     )
     decoded = decode_cursor(cursor) if cursor is not None else None
     rows, has_more = await repo.list_ledger(filters, limit=limit, cursor=decoded)

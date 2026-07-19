@@ -117,6 +117,7 @@ class LedgerFilters:
     min_edge: float | None = None  # fraction, matching edge_at_placement
     graded_from: datetime | None = None
     is_parlay: bool | None = None  # True: parlay parents only; False: excludes them
+    is_live: bool | None = None  # True: live (in-game) bets only; False: pregame only
 
 
 def _opt_float(value: Any) -> float | None:
@@ -237,6 +238,8 @@ def _filter_conditions(filters: LedgerFilters) -> list[Any]:
         conditions.append(paper_bets.c.graded_at >= filters.graded_from)
     if filters.is_parlay is not None:
         conditions.append(paper_bets.c.is_parlay == filters.is_parlay)
+    if filters.is_live is not None:
+        conditions.append(paper_bets.c.is_live == filters.is_live)
     return conditions
 
 
