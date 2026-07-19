@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import (
     TIMESTAMP,
+    Boolean,
     CheckConstraint,
     Column,
     ForeignKey,
@@ -48,17 +49,28 @@ def _uuid_pk() -> Any:
     )
 
 
+# Nullable side/game_id + YES/NO + prop columns arrived with parlays and
+# props (Phase 7 Wave 0, ADR-028/029): a parlay parent row spans multiple
+# games and carries no single side; single-sided props grade YES/NO.
+_SIDE_VOCABULARY = "side IS NULL OR side IN ('HOME', 'AWAY', 'DRAW', 'OVER', 'UNDER', 'YES', 'NO')"
+
 paper_bets = Table(
     "paper_bets",
     metadata,
     _uuid_pk(),
-    Column("game_id", UUID(as_uuid=True), nullable=False),
+    Column("game_id", UUID(as_uuid=True)),
     Column("game_external_id", Text, nullable=False),
     Column("league", _enum("league_enum"), nullable=False),
     Column("market_type", _enum("market_type_enum"), nullable=False),
     Column("selection", Text, nullable=False),
-    Column("side", Text, nullable=False),
+    Column("side", Text),
     Column("line_value", Numeric(8, 2)),
+    Column("player_external_id", Text),
+    Column("stat_type", Text),
+    Column("prop_type", Text),
+    Column("is_parlay", Boolean, nullable=False, server_default=text("FALSE")),
+    Column("is_live", Boolean, nullable=False, server_default=text("FALSE")),
+    Column("parent_bet_id", UUID(as_uuid=True), ForeignKey("paper_bets.id", name="fk_paper_bets_parent_bet")),
     Column("sportsbook_id", UUID(as_uuid=True)),
     Column("sportsbook_key", Text, nullable=False),
     Column("odds_american", Integer, nullable=False),
@@ -76,7 +88,7 @@ paper_bets = Table(
     Column("placed_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")),
     Column("graded_at", TIMESTAMP(timezone=True)),
     UniqueConstraint("idempotency_key", name="uq_paper_bets_idempotency_key"),
-    CheckConstraint("side IN ('HOME', 'AWAY', 'DRAW', 'OVER', 'UNDER')", name="chk_paper_bets_side"),
+    CheckConstraint(_SIDE_VOCABULARY, name="chk_paper_bets_side"),
     CheckConstraint("stake > 0", name="chk_paper_bets_stake_positive"),
     CheckConstraint(
         "predicted_probability > 0 AND predicted_probability < 1",
@@ -105,9 +117,39 @@ bet_grades = Table(
     Column("closing_line_value", Numeric(8, 2)),
     Column("closing_odds", Integer),
     Column("clv", Numeric(6, 5)),
+    Column("actual_stat_value", Numeric(10, 2)),
+    Column("stat_type", Text),
     Column("graded_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")),
     Index("idx_bet_grades_bet", "bet_id"),
     Index("idx_bet_grades_graded", text("graded_at DESC")),
+)
+
+# Per-leg selections of a parlay (ADR-028): each leg grades independently
+# via the same market grading paths as a single bet; the parent paper_bets
+# row (is_parlay=TRUE) settles once every leg is decided.
+parlay_legs = Table(
+    "parlay_legs",
+    metadata,
+    _uuid_pk(),
+    Column("bet_id", UUID(as_uuid=True), ForeignKey("paper_bets.id", ondelete="CASCADE"), nullable=False),
+    Column("leg_index", Integer, nullable=False),
+    Column("game_id", UUID(as_uuid=True)),
+    Column("game_external_id", Text, nullable=False),
+    Column("league", _enum("league_enum"), nullable=False),
+    Column("market_type", _enum("market_type_enum"), nullable=False),
+    Column("selection", Text, nullable=False),
+    Column("side", Text),
+    Column("line_value", Numeric(8, 2)),
+    Column("player_external_id", Text),
+    Column("stat_type", Text),
+    Column("prop_type", Text),
+    Column("odds_american", Integer, nullable=False),
+    Column("odds_decimal", Numeric(8, 4), nullable=False),
+    Column("leg_status", _enum("bet_result_enum"), nullable=False, server_default=text("'OPEN'")),
+    UniqueConstraint("bet_id", "leg_index", name="uq_parlay_legs_bet_leg_index"),
+    CheckConstraint(_SIDE_VOCABULARY, name="chk_parlay_legs_side"),
+    Index("idx_parlay_legs_bet", "bet_id"),
+    Index("idx_parlay_legs_open_game", "game_id", postgresql_where=text("leg_status = 'OPEN'")),
 )
 
 bankroll_snapshots = Table(

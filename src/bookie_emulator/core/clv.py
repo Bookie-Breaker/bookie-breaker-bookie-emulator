@@ -13,7 +13,7 @@ from bookie_emulator.core.odds import implied_probability
 def match_closing_line(
     closing_lines: Sequence[LineSnapshot],
     market_type: str,
-    side: str,
+    side: str | None,
     sportsbook_key: str,
     line_value: float | None,
 ) -> LineSnapshot | None:
