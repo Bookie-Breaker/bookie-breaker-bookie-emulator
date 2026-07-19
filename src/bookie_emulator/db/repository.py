@@ -16,12 +16,14 @@ from bookie_emulator.db.tables import bankroll_snapshots, bet_grades, paper_bets
 @dataclass(frozen=True)
 class PaperBetRecord:
     id: uuid.UUID
-    game_id: uuid.UUID
+    # game_id/side are None only on parlay parent rows (is_parlay=True) and
+    # sideless props; single-bet paths must guard (ADR-028).
+    game_id: uuid.UUID | None
     game_external_id: str
     league: str
     market_type: str
     selection: str
-    side: str
+    side: str | None
     line_value: float | None
     sportsbook_id: uuid.UUID | None
     sportsbook_key: str
@@ -39,6 +41,12 @@ class PaperBetRecord:
     status: str
     placed_at: datetime
     graded_at: datetime | None
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
+    is_parlay: bool = False
+    is_live: bool = False
+    parent_bet_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +64,8 @@ class BetGradeRecord:
     closing_odds: int | None
     clv: float | None
     graded_at: datetime
+    actual_stat_value: float | None = None
+    stat_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +126,12 @@ def _bet_from_row(row: Row[Any]) -> PaperBetRecord:
         status=row.status,
         placed_at=row.placed_at,
         graded_at=row.graded_at,
+        player_external_id=row.player_external_id,
+        stat_type=row.stat_type,
+        prop_type=row.prop_type,
+        is_parlay=row.is_parlay,
+        is_live=row.is_live,
+        parent_bet_id=row.parent_bet_id,
     )
 
 
@@ -132,6 +148,9 @@ _GRADE_COLUMNS = [
     bet_grades.c.closing_line_value,
     bet_grades.c.closing_odds,
     bet_grades.c.clv,
+    bet_grades.c.actual_stat_value,
+    # labeled: paper_bets carries its own stat_type since Phase 7 Wave 0
+    bet_grades.c.stat_type.label("grade_stat_type"),
     bet_grades.c.graded_at.label("grade_graded_at"),
 ]
 
@@ -153,6 +172,8 @@ def _grade_from_row(row: Row[Any]) -> BetGradeRecord | None:
         closing_odds=row.closing_odds,
         clv=_opt_float(row.clv),
         graded_at=row.grade_graded_at,
+        actual_stat_value=_opt_float(row.actual_stat_value),
+        stat_type=row.grade_stat_type,
     )
 
 
@@ -280,7 +301,12 @@ class PaperBetRepository:
         stmt = (
             select(paper_bets.c.game_id)
             .distinct()
-            .where(paper_bets.c.status == "OPEN", paper_bets.c.game_start_at < cutoff)
+            .where(
+                paper_bets.c.status == "OPEN",
+                paper_bets.c.game_start_at < cutoff,
+                # parlay parents have no game_id; they settle via their legs
+                paper_bets.c.game_id.is_not(None),
+            )
         )
         async with self._engine.connect() as conn:
             rows = (await conn.execute(stmt)).fetchall()

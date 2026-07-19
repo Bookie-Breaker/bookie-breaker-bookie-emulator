@@ -16,8 +16,9 @@ from pydantic import BaseModel, Field, model_validator
 
 from bookie_emulator.db.repository import BankrollSnapshotRecord, BetGradeRecord, PaperBetRecord
 
-MarketType = Literal["SPREAD", "TOTAL", "MONEYLINE"]
-Side = Literal["HOME", "AWAY", "DRAW", "OVER", "UNDER"]
+MarketType = Literal["SPREAD", "TOTAL", "MONEYLINE", "PLAYER_PROP", "TEAM_PROP", "GAME_PROP"]
+Side = Literal["HOME", "AWAY", "DRAW", "OVER", "UNDER", "YES", "NO"]
+PROP_MARKETS: frozenset[str] = frozenset({"PLAYER_PROP", "TEAM_PROP", "GAME_PROP"})
 League = Literal["NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB", "FIFA_WC", "EPL", "NHL", "NCAA_HKY"]
 ApiResult = Literal["PENDING", "WIN", "LOSS", "PUSH", "VOID"]
 StatusFilter = Literal["open", "graded", "all"]
@@ -52,6 +53,9 @@ class PlaceBetRequest(BaseModel):
     selection: str
     side: Side
     sportsbook_key: str | None = None
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: Literal["OVER_UNDER", "YES_NO"] | None = None
     predicted_probability: float = Field(gt=0.0, lt=1.0)
     edge_percentage: float = Field(gt=0.0, description="Edge in percentage points (4.2 = 4.2%).")
     stake: float = Field(description="Stake in units. Must fit the available bankroll (checked at placement).")
@@ -60,9 +64,14 @@ class PlaceBetRequest(BaseModel):
 
     @model_validator(mode="after")
     def _side_valid_for_market(self) -> "PlaceBetRequest":
-        """DRAW exists only on three-way moneylines (ADR-027)."""
+        """DRAW ⇒ three-way moneylines (ADR-027); YES/NO ⇒ prop markets;
+        prop markets carry a structured stat_type (ADR-029)."""
         if self.side == "DRAW" and self.market_type != "MONEYLINE":
             raise ValueError(f"Side DRAW is only valid for MONEYLINE markets, not {self.market_type}")
+        if self.side in ("YES", "NO") and self.market_type not in PROP_MARKETS:
+            raise ValueError(f"Side {self.side} is only valid for prop markets, not {self.market_type}")
+        if self.market_type in PROP_MARKETS and not self.stat_type:
+            raise ValueError(f"{self.market_type} bets require stat_type (ADR-029)")
         return self
 
 
@@ -84,7 +93,8 @@ class GradeData(BaseModel):
 
 class BetData(BaseModel):
     id: uuid.UUID
-    game_id: uuid.UUID
+    # game_id/side are null on parlay parent rows (ADR-028)
+    game_id: uuid.UUID | None
     game_external_id: str
     edge_id: uuid.UUID | None
     prediction_id: uuid.UUID | None
@@ -92,8 +102,13 @@ class BetData(BaseModel):
     sportsbook_key: str
     market_type: str
     selection: str
-    side: str
+    side: str | None
     line_value: float | None
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
+    is_parlay: bool = False
+    is_live: bool = False
     odds_american: int
     odds_decimal: float
     stake: float
@@ -130,6 +145,11 @@ def bet_to_data(bet: PaperBetRecord, grade: BetGradeRecord | None, unit_size_dol
         selection=bet.selection,
         side=bet.side,
         line_value=bet.line_value,
+        player_external_id=bet.player_external_id,
+        stat_type=bet.stat_type,
+        prop_type=bet.prop_type,
+        is_parlay=bet.is_parlay,
+        is_live=bet.is_live,
         odds_american=bet.odds_american,
         odds_decimal=bet.odds_decimal,
         stake=bet.stake,

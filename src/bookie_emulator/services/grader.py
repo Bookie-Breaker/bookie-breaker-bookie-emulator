@@ -93,6 +93,8 @@ class GraderService:
         bet, _ = found
         if bet.status != "OPEN" and not force:
             raise DuplicateResourceError(f"Bet {bet_id} is already graded; pass force=true to re-grade")
+        if bet.is_parlay or bet.game_id is None:
+            raise UnprocessableError(f"Bet {bet_id} is a parlay parent; it settles from its legs, not a single game")
 
         try:
             game = await self._statistics.get_game(str(bet.game_id))

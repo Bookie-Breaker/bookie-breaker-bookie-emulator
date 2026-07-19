@@ -33,7 +33,7 @@ def _game_summary(home_score: int, away_score: int, home_team: str | None, away_
 
 def grade_bet(
     market_type: str,
-    side: str,
+    side: str | None,
     line_value: float | None,
     home_score: int,
     away_score: int,
@@ -49,7 +49,13 @@ def grade_bet(
     ``three_way_moneyline`` selects soccer-style moneyline grading
     (ADR-027): a tie wins the DRAW side and loses HOME/AWAY -- there is no
     push path. Side DRAW is only valid on a three-way MONEYLINE.
+
+    ``side`` is nullable in the schema (parlay parents, ADR-028) but the
+    score-based markets graded here always require one; a missing side
+    would otherwise silently grade as AWAY/UNDER.
     """
+    if side is None:
+        raise ValueError(f"Cannot grade a {market_type} bet without a side (parlay parents grade via their legs)")
     if side == "DRAW" and not (three_way_moneyline and market_type == "MONEYLINE"):
         raise ValueError(f"Cannot grade side DRAW on a two-way {market_type} market")
     margin = home_score - away_score
