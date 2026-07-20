@@ -1,6 +1,9 @@
 # bookie-breaker-bookie-emulator
 
-Paper trading system for placing virtual bets and tracking prediction performance.
+Paper-trading engine (port 8005). Places virtual single bets and parlays with
+`X-Idempotency-Key` deduplication, captures odds at placement time, auto-grades on
+`events:game.completed` (per-leg for parlays), and tracks bankroll, ROI, win rate, and CLV
+against closing lines. All state lives in the `emulator` schema (Alembic migrations).
 
 ## Quickstart
 
@@ -21,13 +24,24 @@ task dev
 
 ## API
 
-API documentation available at `http://localhost:8005/docs` when running. The exported OpenAPI artifact lives in
-`bookie-breaker-docs/api-contracts/openapi/bookie-emulator.yaml` (regenerate with `task spec:export`).
+Interactive docs at `http://localhost:8005/docs` when running. All endpoints live under
+`/api/v1/emulator`. The exported OpenAPI artifact lives in
+`bookie-breaker-docs/api-contracts/openapi/bookie-emulator.yaml` (regenerate with
+`task spec:export`).
+
+Full contract:
+[bookie-emulator-api.md](https://github.com/Bookie-Breaker/bookie-breaker-docs/blob/main/api-contracts/bookie-emulator-api.md)
 
 ## Architecture Decisions
 
-- [Tech Stack Selection (ADR-010)](https://github.com/Bookie-Breaker/bookie-breaker-docs/blob/main/decisions/010-tech-stack-selection.md)
+- [Paper Trading Mode (ADR-003)](https://github.com/Bookie-Breaker/bookie-breaker-docs/blob/main/decisions/003-paper-trading-mode.md)
+- [Parlay Data Model (ADR-028)](https://github.com/Bookie-Breaker/bookie-breaker-docs/blob/main/decisions/028-parlay-data-model.md)
+
+Betting workflow from edge to graded bet:
+[Finding and Betting Edges playbook](https://github.com/Bookie-Breaker/bookie-breaker-docs/blob/main/playbooks/03-finding-and-betting-edges.md)
 
 ## Environment Variables
 
-See `.env.example` for all variables with descriptions.
+See `.env.example` for all variables with descriptions. Key ones: `DATABASE_URL`,
+`LINES_SERVICE_URL`, `STATISTICS_SERVICE_URL`, `REDIS_URL`, `STARTING_BANKROLL_UNITS`,
+`UNIT_SIZE_DOLLARS`, `GRADING_POLL_SECONDS`, `PORT=8005`.
