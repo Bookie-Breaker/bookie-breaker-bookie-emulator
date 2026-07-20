@@ -4,7 +4,7 @@ import logging
 import uuid
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 from bookie_emulator.api.errors import NotFoundError, UnprocessableError
 from bookie_emulator.api.schemas import (
@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 PARLAY_MARKETS: frozenset[str] = frozenset({"SPREAD", "TOTAL", "MONEYLINE"})
 
 _PARLAY_SELECTION_MAX = 500
+
+# statistics-service game_status_enum values a live (in-game) bet may be
+# placed against: SCHEDULED (a live-flagged pregame placement is harmless)
+# and IN_PROGRESS. FINAL is rejected as ended; POSTPONED/CANCELLED/SUSPENDED
+# are rejected as not open for betting.
+_LIVE_PLACEABLE_STATUSES: frozenset[str] = frozenset({"SCHEDULED", "IN_PROGRESS"})
+
+_LineT = TypeVar("_LineT", LineSnapshot, BestLine)
 
 
 class OddsSelection(Protocol):
@@ -51,6 +59,12 @@ def validate_parlay_legs(legs: Sequence[ParlayLegRequest]) -> None:
     the same (game, market, side) twice is a duplicate, and differing sides
     on one market are mutually exclusive (which also covers HOME/DRAW/AWAY
     combinations on three-way moneylines).
+
+    Live parlays are OUT of scope in v1: legs carry no is_live flag (extra
+    request fields are ignored by pydantic), and place_parlay keeps the
+    pregame-only rule -- any leg whose game is not SCHEDULED, or has already
+    started, is rejected with a 422 ("has already started or is not open for
+    betting"). In-game legs therefore cannot enter a parlay by any path.
     """
     seen: set[tuple[uuid.UUID, str]] = set()
     for index, leg in enumerate(legs):
@@ -106,7 +120,14 @@ class BetService:
 
         game = await self._fetch_game(request.game_id)
         start_at = _parse_start(game.scheduled_start)
-        if game.status != "SCHEDULED" or (start_at is not None and start_at <= utc_now()):
+        if request.is_live:
+            # live placements skip the not-started check: SCHEDULED and
+            # IN_PROGRESS are both placeable, anything final/abandoned is not
+            if game.status == "FINAL":
+                raise UnprocessableError(f"Game {request.game_id} has ended and is not open for live betting")
+            if game.status not in _LIVE_PLACEABLE_STATUSES:
+                raise UnprocessableError(f"Game {request.game_id} is {game.status} and is not open for betting")
+        elif game.status != "SCHEDULED" or (start_at is not None and start_at <= utc_now()):
             raise UnprocessableError(f"Game {request.game_id} has already started or is not open for betting")
 
         external_id = request.game_external_id or await self._reconciler.resolve(game)
@@ -115,8 +136,14 @@ class BetService:
                 f"No market data exists for game {request.game_id}: it could not be matched to a lines-service game"
             )
 
-        odds = await self._capture_odds(request, external_id)
+        odds = await self._capture_odds(request, external_id, prefer_live=request.is_live)
         await self._check_bankroll(request.stake)
+
+        if request.is_live and start_at is None:
+            # an unparseable scheduled_start falls back to placement time
+            # (>= actual start for an in-progress game) so the fallback
+            # grading poller, which gates on game_start_at, never skips the bet
+            start_at = utc_now()
 
         kelly = request.kelly_fraction if request.kelly_fraction is not None else self._settings.kelly_fraction
         values: dict[str, Any] = {
@@ -143,6 +170,7 @@ class BetService:
             "edge_id": request.edge_id,
             "idempotency_key": idempotency_key,
             "game_start_at": start_at,
+            "is_live": request.is_live,
         }
         return await self._repo.insert_idempotent(values)
 
@@ -171,6 +199,10 @@ class BetService:
         - sportsbook_key is the single book when all legs share one, else
           "mixed" (sportsbook_id only survives when uniform)
         - odds are the combined price: decimal = product of leg decimals
+
+        Live parlays are out of scope in v1: every leg's game must still be
+        SCHEDULED and not started (422 otherwise), and odds capture never
+        prefers live lines. See validate_parlay_legs.
         """
         if request.stake <= 0:
             raise UnprocessableError("Stake must be positive")
@@ -246,45 +278,87 @@ class BetService:
         }
         return await self._repo.insert_parlay(parent_values, leg_values)
 
-    async def _capture_odds(self, request: OddsSelection, external_id: str) -> dict[str, Any]:
-        """Capture current odds from lines-service; DependencyError propagates as 502."""
+    async def _capture_odds(
+        self, request: OddsSelection, external_id: str, prefer_live: bool = False
+    ) -> dict[str, Any]:
+        """Capture current odds from lines-service; DependencyError propagates as 502.
+
+        With prefer_live=True (live single-bet placements), lines flagged
+        is_live win over pregame lines; when no live line matches, the
+        freshest matching line is used with a logged note.
+        """
         try:
             if request.sportsbook_key:
-                return self._pick_pinned_line(request, await self._lines.game_lines(external_id))
-            return self._pick_best_line(request, await self._lines.best_lines(external_id, request.market_type))
+                return self._pick_pinned_line(request, await self._lines.game_lines(external_id), prefer_live)
+            return self._pick_best_line(
+                request, await self._lines.best_lines(external_id, request.market_type), prefer_live
+            )
         except NotFoundError as exc:
             raise UnprocessableError(f"No market data exists for game {request.game_id} in lines-service") from exc
 
-    def _pick_pinned_line(self, request: OddsSelection, snapshots: list[LineSnapshot]) -> dict[str, Any]:
-        for snapshot in snapshots:
-            if (
-                snapshot.sportsbook_key == request.sportsbook_key
-                and snapshot.market_type == request.market_type
-                and snapshot.side == request.side
-            ):
-                return {
-                    "line_value": snapshot.line_value,
-                    "odds_american": snapshot.odds_american,
-                    "odds_decimal": snapshot.odds_decimal,
-                    "sportsbook_id": _parse_uuid(snapshot.sportsbook_id),
-                    "sportsbook_key": snapshot.sportsbook_key,
-                }
+    def _select_line(self, request: OddsSelection, matches: list[_LineT], prefer_live: bool) -> _LineT | None:
+        """Pick one line among the matching candidates.
+
+        Pregame placements keep the historical behavior (first match). Live
+        placements prefer is_live lines (freshest first); with none available
+        they fall back to the freshest match of any kind, with a logged note.
+        """
+        if not matches:
+            return None
+        if not prefer_live:
+            return matches[0]
+        live = [line for line in matches if line.is_live]
+        if live:
+            return max(live, key=lambda line: line.timestamp)
+        logger.info(
+            "no live %s %s line for game %s; falling back to freshest available line",
+            request.market_type,
+            request.side,
+            request.game_id,
+        )
+        return max(matches, key=lambda line: line.timestamp)
+
+    def _pick_pinned_line(
+        self, request: OddsSelection, snapshots: list[LineSnapshot], prefer_live: bool = False
+    ) -> dict[str, Any]:
+        matches = [
+            snapshot
+            for snapshot in snapshots
+            if snapshot.sportsbook_key == request.sportsbook_key
+            and snapshot.market_type == request.market_type
+            and snapshot.side == request.side
+        ]
+        snapshot = self._select_line(request, matches, prefer_live)
+        if snapshot is not None:
+            return {
+                "line_value": snapshot.line_value,
+                "odds_american": snapshot.odds_american,
+                "odds_decimal": snapshot.odds_decimal,
+                "sportsbook_id": _parse_uuid(snapshot.sportsbook_id),
+                "sportsbook_key": snapshot.sportsbook_key,
+            }
         raise UnprocessableError(
             f"No {request.market_type} {request.side} line found at {request.sportsbook_key} for game {request.game_id}"
         )
 
-    def _pick_best_line(self, request: OddsSelection, best_lines: list[BestLine]) -> dict[str, Any]:
-        for line in best_lines:
-            if line.market_type == request.market_type and (
-                line.side == request.side or line.selection == request.selection
-            ):
-                return {
-                    "line_value": line.line_value,
-                    "odds_american": line.best_odds_american,
-                    "odds_decimal": line.best_odds_decimal,
-                    "sportsbook_id": _parse_uuid(line.sportsbook_id),
-                    "sportsbook_key": line.sportsbook_key,
-                }
+    def _pick_best_line(
+        self, request: OddsSelection, best_lines: list[BestLine], prefer_live: bool = False
+    ) -> dict[str, Any]:
+        matches = [
+            line
+            for line in best_lines
+            if line.market_type == request.market_type
+            and (line.side == request.side or line.selection == request.selection)
+        ]
+        line = self._select_line(request, matches, prefer_live)
+        if line is not None:
+            return {
+                "line_value": line.line_value,
+                "odds_american": line.best_odds_american,
+                "odds_decimal": line.best_odds_decimal,
+                "sportsbook_id": _parse_uuid(line.sportsbook_id),
+                "sportsbook_key": line.sportsbook_key,
+            }
         raise UnprocessableError(f"No {request.market_type} {request.side} line found for game {request.game_id}")
 
     async def _check_bankroll(self, stake: float) -> None:

@@ -65,6 +65,10 @@ class PlaceBetRequest(BaseModel):
     stake: float = Field(description="Stake in units. Must fit the available bankroll (checked at placement).")
     kelly_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
     reasoning: str | None = None
+    is_live: bool = Field(
+        default=False,
+        description="In-game placement: the game may be IN_PROGRESS and live lines are preferred at odds capture.",
+    )
 
     @model_validator(mode="after")
     def _side_valid_for_market(self) -> "PlaceBetRequest":

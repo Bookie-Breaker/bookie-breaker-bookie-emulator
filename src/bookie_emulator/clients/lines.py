@@ -28,6 +28,8 @@ class LineSnapshot(BaseModel):
     implied_probability: float | None = None
     is_opening: bool = False
     is_closing: bool = False
+    # in-game price (Phase 7 Wave 2): live placements prefer these snapshots
+    is_live: bool = False
     timestamp: str = ""
 
 
@@ -43,6 +45,8 @@ class BestLine(BaseModel):
     implied_probability: float | None = None
     sportsbook_id: str | None = None
     sportsbook_key: str = ""
+    # in-game price (Phase 7 Wave 2): live placements prefer these lines
+    is_live: bool = False
     timestamp: str = ""
 
 
