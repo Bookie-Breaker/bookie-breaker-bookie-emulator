@@ -128,10 +128,11 @@ class TestPlaceParlayRequestValidation:
 class TestValidateParlayLegs:
     """Business rules raise UnprocessableError (pinned contract: 422)."""
 
-    @pytest.mark.parametrize("market_type", ["PLAYER_PROP", "TEAM_PROP", "GAME_PROP"])
-    def test_prop_markets_rejected(self, market_type: str) -> None:
+    @pytest.mark.parametrize("market_type", ["TEAM_PROP", "GAME_PROP"])
+    def test_team_and_game_prop_markets_rejected(self, market_type: str) -> None:
+        # PLAYER_PROP legs are supported since Wave 4 (see test_parlay_prop_legs)
         legs = [leg(), leg(market_type=market_type, side="OVER")]
-        with pytest.raises(UnprocessableError, match="only SPREAD, TOTAL, and MONEYLINE"):
+        with pytest.raises(UnprocessableError, match="only SPREAD, TOTAL, MONEYLINE, and PLAYER_PROP"):
             validate_parlay_legs(legs)
 
     def test_duplicate_leg_rejected(self) -> None:

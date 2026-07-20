@@ -174,12 +174,21 @@ class TestParlayPlacement:
         assert listed.status_code == 200
         assert bet_id in [bet["id"] for bet in listed.json()["data"]]
 
-    def test_prop_leg_rejected_422(self, client, upstream) -> None:
+    def test_team_prop_leg_rejected_422(self, client, upstream) -> None:
+        # PLAYER_PROP legs are supported since Wave 4 (test_parlay_prop_leg_flow);
+        # TEAM_PROP/GAME_PROP legs remain rejected
+        (game_a, ext_a), (game_b, ext_b) = scheduled_pair(upstream)
+        prop_leg = leg_body(game_b, ext_b, market_type="TEAM_PROP", selection="LAL Over 110.5", side="OVER")
+        response = post_parlay(client, [leg_body(game_a, ext_a), prop_leg])
+        assert response.status_code == 422
+        assert "only SPREAD, TOTAL, MONEYLINE, and PLAYER_PROP" in response.json()["error"]["message"]
+
+    def test_player_prop_leg_without_stat_terms_rejected_422(self, client, upstream) -> None:
         (game_a, ext_a), (game_b, ext_b) = scheduled_pair(upstream)
         prop_leg = leg_body(game_b, ext_b, market_type="PLAYER_PROP", selection="LeBron Over 27.5", side="OVER")
         response = post_parlay(client, [leg_body(game_a, ext_a), prop_leg])
         assert response.status_code == 422
-        assert "only SPREAD, TOTAL, and MONEYLINE" in response.json()["error"]["message"]
+        assert "requires stat_type and prop_type" in response.json()["error"]["message"]
 
     def test_duplicate_and_opposite_legs_rejected_422(self, client, upstream) -> None:
         (game_a, ext_a), _ = scheduled_pair(upstream)
