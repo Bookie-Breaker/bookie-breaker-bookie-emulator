@@ -1,5 +1,13 @@
 # bookie-breaker-bookie-emulator
 
+[![CI](https://img.shields.io/github/actions/workflow/status/Bookie-Breaker/bookie-breaker-bookie-emulator/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white)](https://github.com/Bookie-Breaker/bookie-breaker-bookie-emulator/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/codecov/c/github/Bookie-Breaker/bookie-breaker-bookie-emulator?logo=codecov&logoColor=white)](https://app.codecov.io/gh/Bookie-Breaker/bookie-breaker-bookie-emulator)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
+![uv](https://img.shields.io/badge/uv-managed-DE5FE9?logo=uv&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
+
 Paper-trading engine (port 8005). Places virtual single bets and parlays with
 `X-Idempotency-Key` deduplication, captures odds at placement time, auto-grades on
 `events:game.completed` (per-leg for parlays), and tracks bankroll, ROI, win rate, and CLV
