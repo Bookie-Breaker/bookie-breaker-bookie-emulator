@@ -22,16 +22,16 @@ version = "0.1.0"
 
 [dependency-groups]
 dev = [
-  "ruff",
-  "mypy",
-  "pytest",
-  "pytest-asyncio",
-  "pytest-cov",
-  "pip-audit",
-  "pyyaml",
-  "respx",
-  "testcontainers[postgres,redis]",
-  "types-pyyaml",
+  "ruff>=0.15",
+  "mypy>=2.1",
+  "pytest>=9.1",
+  "pytest-asyncio>=1.4",
+  "pytest-cov>=7.1",
+  "pip-audit>=2.10",
+  "pyyaml>=6.0",
+  "respx>=0.23",
+  "testcontainers[postgres,redis]>=4.14",
+  "types-pyyaml>=6.0.12",
 ]
 
 [tool.ruff]
