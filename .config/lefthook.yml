@@ -109,3 +109,15 @@ pre-push:
     pip-audit:
       glob: "{pyproject.toml,uv.lock,requirements*.txt}"
       run: uv run pip-audit
+
+post-commit:
+  commands:
+    graphify-notify:
+      skip:
+        - merge
+        - rebase
+        - run: test -n "${CI:-}${GITHUB_ACTIONS:-}"
+      run: |
+        top="$(git rev-parse --show-toplevel)"
+        runner="${top}/../bookie-breaker-infra-ops/workspace/scripts/update-graphify.sh"
+        if [ -x "$runner" ]; then "$runner" notify "$(basename "$top")" || true; fi
