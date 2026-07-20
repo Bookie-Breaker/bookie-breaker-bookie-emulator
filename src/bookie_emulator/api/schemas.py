@@ -18,7 +18,9 @@ from bookie_emulator.db.repository import BankrollSnapshotRecord, BetGradeRecord
 
 MarketType = Literal["SPREAD", "TOTAL", "MONEYLINE", "PLAYER_PROP", "TEAM_PROP", "GAME_PROP"]
 Side = Literal["HOME", "AWAY", "DRAW", "OVER", "UNDER", "YES", "NO"]
-ParlaySide = Literal["HOME", "AWAY", "DRAW", "OVER", "UNDER"]
+# Parlay legs share the full side vocabulary since Wave 4 (PLAYER_PROP legs
+# grade YES/NO); the structural side-per-market rules live on the validators.
+ParlayLegSide = Side
 PROP_MARKETS: frozenset[str] = frozenset({"PLAYER_PROP", "TEAM_PROP", "GAME_PROP"})
 League = Literal["NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB", "FIFA_WC", "EPL", "NHL", "NCAA_HKY"]
 ApiResult = Literal["PENDING", "WIN", "LOSS", "PUSH", "VOID"]
@@ -84,9 +86,12 @@ class PlaceBetRequest(BaseModel):
 
 
 class ParlayLegRequest(BaseModel):
-    """One leg of a parlay placement (ADR-028). v1 accepts team markets only.
+    """One leg of a parlay placement (ADR-028). Wave 4 adds PLAYER_PROP legs
+    (prop identity fields, ADR-029 slug, YES/NO sides); TEAM_PROP/GAME_PROP
+    legs remain out of scope.
 
-    Business rules with pinned 422 semantics (prop markets, duplicate or
+    Business rules with pinned 422 semantics (unsupported prop markets,
+    missing prop terms, side/prop_type consistency, duplicate or
     opposite-side legs) are enforced in the service layer, not here: pydantic
     validation surfaces as 400 VALIDATION_ERROR in this API.
     """
@@ -95,17 +100,25 @@ class ParlayLegRequest(BaseModel):
     game_external_id: str | None = None
     market_type: MarketType
     selection: str
-    side: ParlaySide
+    side: ParlayLegSide
     line_value: float | None = Field(
         default=None,
         description="Advisory only: the line captured from lines-service at placement is authoritative.",
     )
     sportsbook_key: str | None = None
+    player_external_id: str | None = Field(
+        default=None,
+        description="Odds API player name slug (ADR-029); PLAYER_PROP legs need it to grade from box scores.",
+    )
+    stat_type: str | None = None
+    prop_type: Literal["OVER_UNDER", "YES_NO"] | None = None
 
     @model_validator(mode="after")
     def _side_valid_for_market(self) -> "ParlayLegRequest":
         if self.side == "DRAW" and self.market_type != "MONEYLINE":
             raise ValueError(f"Side DRAW is only valid for MONEYLINE legs, not {self.market_type}")
+        if self.side in ("YES", "NO") and self.market_type not in PROP_MARKETS:
+            raise ValueError(f"Side {self.side} is only valid for prop legs, not {self.market_type}")
         return self
 
 
@@ -184,6 +197,9 @@ class ParlayLegData(BaseModel):
     selection: str
     side: str | None
     line_value: float | None
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
     odds_american: int
     odds_decimal: float
     leg_status: ApiResult
@@ -270,6 +286,9 @@ def leg_to_data(leg: ParlayLegRecord) -> ParlayLegData:
         selection=leg.selection,
         side=leg.side,
         line_value=leg.line_value,
+        player_external_id=leg.player_external_id,
+        stat_type=leg.stat_type,
+        prop_type=leg.prop_type,
         odds_american=leg.odds_american,
         odds_decimal=leg.odds_decimal,
         leg_status=DB_TO_API_RESULT[leg.leg_status],

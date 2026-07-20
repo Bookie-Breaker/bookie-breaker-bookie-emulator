@@ -8,6 +8,7 @@ from typing import Any, Protocol, TypeVar
 
 from bookie_emulator.api.errors import NotFoundError, UnprocessableError
 from bookie_emulator.api.schemas import (
+    PROP_MARKETS,
     ParlayLegRequest,
     PlaceBetRequest,
     PlaceParlayRequest,
@@ -23,8 +24,16 @@ from bookie_emulator.db.repository import PaperBetRecord, PaperBetRepository, Pa
 
 logger = logging.getLogger(__name__)
 
-# v1 parlay legs are team markets only (ADR-028); props are Wave 2+
-PARLAY_MARKETS: frozenset[str] = frozenset({"SPREAD", "TOTAL", "MONEYLINE"})
+# Parlay legs are team markets (ADR-028) plus PLAYER_PROP since Phase 7
+# Wave 4; TEAM_PROP/GAME_PROP legs remain out of scope.
+PARLAY_MARKETS: frozenset[str] = frozenset({"SPREAD", "TOTAL", "MONEYLINE", "PLAYER_PROP"})
+
+# side vocabulary per prop_type (pinned contract: YES/NO <=> YES_NO,
+# OVER/UNDER <=> OVER_UNDER)
+_PROP_SIDES_BY_TYPE: dict[str, tuple[str, str]] = {
+    "YES_NO": ("YES", "NO"),
+    "OVER_UNDER": ("OVER", "UNDER"),
+}
 
 _PARLAY_SELECTION_MAX = 500
 
@@ -55,10 +64,17 @@ class OddsSelection(Protocol):
 def validate_parlay_legs(legs: Sequence[ParlayLegRequest]) -> None:
     """Business-rule validation for parlay legs (pinned contract: 422s).
 
-    v1 accepts team markets only. No two legs may share a (game, market):
-    the same (game, market, side) twice is a duplicate, and differing sides
-    on one market are mutually exclusive (which also covers HOME/DRAW/AWAY
-    combinations on three-way moneylines).
+    Legs may be team markets or PLAYER_PROP (Wave 4); TEAM_PROP/GAME_PROP
+    are rejected. A PLAYER_PROP leg must carry stat_type + prop_type, and
+    its side must match the prop_type vocabulary (YES/NO <=> YES_NO,
+    OVER/UNDER <=> OVER_UNDER).
+
+    No two legs may share a (game, market, player, stat) key: the same
+    selection twice is a duplicate, and differing sides on one key are
+    mutually exclusive (covering HOME/DRAW/AWAY combinations on three-way
+    moneylines and OVER/UNDER or YES/NO on one player's stat). Team-market
+    legs carry no player/stat, so a team leg and a prop leg on one game
+    coexist, as do two different players' props on one game.
 
     Live parlays are OUT of scope in v1: legs carry no is_live flag (extra
     request fields are ignored by pydantic), and place_parlay keeps the
@@ -66,14 +82,25 @@ def validate_parlay_legs(legs: Sequence[ParlayLegRequest]) -> None:
     started, is rejected with a 422 ("has already started or is not open for
     betting"). In-game legs therefore cannot enter a parlay by any path.
     """
-    seen: set[tuple[uuid.UUID, str]] = set()
+    seen: set[tuple[uuid.UUID, str, str | None, str | None]] = set()
     for index, leg in enumerate(legs):
         if leg.market_type not in PARLAY_MARKETS:
             raise UnprocessableError(
                 f"Parlay leg {index} has market {leg.market_type}: "
-                "only SPREAD, TOTAL, and MONEYLINE legs are supported in v1"
+                "only SPREAD, TOTAL, MONEYLINE, and PLAYER_PROP legs are supported"
             )
-        key = (leg.game_id, leg.market_type)
+        if leg.market_type == "PLAYER_PROP":
+            if not leg.stat_type or not leg.prop_type:
+                raise UnprocessableError(
+                    f"Parlay leg {index} is a PLAYER_PROP and requires stat_type and prop_type (ADR-029)"
+                )
+            valid_sides = _PROP_SIDES_BY_TYPE[leg.prop_type]
+            if leg.side not in valid_sides:
+                raise UnprocessableError(
+                    f"Parlay leg {index} side {leg.side} is not valid for a {leg.prop_type} prop: "
+                    f"expected {valid_sides[0]} or {valid_sides[1]}"
+                )
+        key = (leg.game_id, leg.market_type, leg.player_external_id, leg.stat_type)
         if key in seen:
             raise UnprocessableError(
                 f"Parlay leg {index} repeats game {leg.game_id} market {leg.market_type}: "
@@ -239,6 +266,9 @@ class BetService:
                     "market_type": leg.market_type,
                     "selection": leg.selection,
                     "side": leg.side,
+                    "player_external_id": leg.player_external_id,
+                    "stat_type": leg.stat_type,
+                    "prop_type": leg.prop_type,
                     "line_value": odds["line_value"],
                     "odds_american": odds["odds_american"],
                     "odds_decimal": odds["odds_decimal"],
@@ -321,12 +351,19 @@ class BetService:
     def _pick_pinned_line(
         self, request: OddsSelection, snapshots: list[LineSnapshot], prefer_live: bool = False
     ) -> dict[str, Any]:
+        """Match a line at the pinned book by market + side.
+
+        Prop markets additionally require an exact selection match: prop
+        lines are per-player (the selection string carries the player), so a
+        side-only match could capture another player's price.
+        """
         matches = [
             snapshot
             for snapshot in snapshots
             if snapshot.sportsbook_key == request.sportsbook_key
             and snapshot.market_type == request.market_type
             and snapshot.side == request.side
+            and (request.market_type not in PROP_MARKETS or snapshot.selection == request.selection)
         ]
         snapshot = self._select_line(request, matches, prefer_live)
         if snapshot is not None:
@@ -344,12 +381,27 @@ class BetService:
     def _pick_best_line(
         self, request: OddsSelection, best_lines: list[BestLine], prefer_live: bool = False
     ) -> dict[str, Any]:
-        matches = [
-            line
-            for line in best_lines
-            if line.market_type == request.market_type
-            and (line.side == request.side or line.selection == request.selection)
-        ]
+        """Match a best-line entry by market + side-or-selection.
+
+        Prop markets match on selection only: best-line entries for props
+        are per-player, so the selection string (which carries the player)
+        disambiguates where a side-only match (e.g. OVER) could capture
+        another player's line. No player/stat narrowing is needed on
+        OddsSelection because of this.
+        """
+        if request.market_type in PROP_MARKETS:
+            matches = [
+                line
+                for line in best_lines
+                if line.market_type == request.market_type and line.selection == request.selection
+            ]
+        else:
+            matches = [
+                line
+                for line in best_lines
+                if line.market_type == request.market_type
+                and (line.side == request.side or line.selection == request.selection)
+            ]
         line = self._select_line(request, matches, prefer_live)
         if line is not None:
             return {

@@ -19,7 +19,7 @@ from bookie_emulator.config import Settings
 from bookie_emulator.core.clv import compute_clv, match_closing_line
 from bookie_emulator.core.grading import GradeStatus, grade_bet, profit_loss
 from bookie_emulator.core.parlay import leg_outcome_summary, settle_parlay
-from bookie_emulator.core.prop_grading import STAT_EXTRACTORS, find_player_line, grade_player_prop
+from bookie_emulator.core.prop_grading import resolve_player_prop
 from bookie_emulator.core.settlement import is_three_way_moneyline_league, settlement_scores
 from bookie_emulator.db.repository import BetGradeRecord, PaperBetRecord, PaperBetRepository, ParlayLegRecord
 from bookie_emulator.events.publisher import publish_bet_graded
@@ -63,9 +63,10 @@ class GraderService:
 
         Returns single bets graded plus parlay parents settled (legs whose
         parent still has other games open do not count until it settles).
-        Prop bets grade from the game's box score (fetched once per game);
-        while it is unavailable they stay OPEN and the fallback poller
-        retries on later sweeps.
+        Prop bets and PLAYER_PROP parlay legs grade from the game's box
+        score (fetched once per game, shared across both); while it is
+        unavailable they stay OPEN and the fallback poller retries on later
+        sweeps.
         """
         bets = await self._repo.open_bets_for_game(uuid.UUID(game_id))
         legs = await self._repo.open_parlay_legs_for_game(uuid.UUID(game_id))
@@ -73,6 +74,10 @@ class GraderService:
             return 0
         score_bets = [bet for bet in bets if bet.market_type not in PROP_MARKETS]
         prop_bets = [bet for bet in bets if bet.market_type in PROP_MARKETS]
+        needs_box = any(bet.market_type == "PLAYER_PROP" for bet in prop_bets) or any(
+            leg.market_type == "PLAYER_PROP" for leg in legs
+        )
+        box = await self._fetch_box_score(game_id) if needs_box else None
         closing_by_game: dict[str, list[LineSnapshot]] = {}
         graded = 0
         for bet in score_bets:
@@ -95,7 +100,7 @@ class GraderService:
             graded += 1 if applied else 0
         graded += await self._grade_props(
             prop_bets,
-            game_id,
+            box,
             home_score=home_score,
             away_score=away_score,
             total=total,
@@ -104,6 +109,7 @@ class GraderService:
         )
         settled_parents = await self._grade_parlay_legs(
             legs,
+            box,
             home_score=home_score,
             away_score=away_score,
             home_team=home_team,
@@ -135,11 +141,16 @@ class GraderService:
             # per-leg manual grading is not supported in v1: legs settle via
             # their games (event or poller); this endpoint (re-)settles the
             # parent once every leg is decided
-            open_legs = await self._repo.open_leg_count(bet_id)
+            open_legs = [leg for leg in await self._repo.legs_for_bet(bet_id) if leg.leg_status == "OPEN"]
             if open_legs:
+                hint = (
+                    " (player-prop legs settle from box scores, which may lag the final score)"
+                    if any(leg.market_type == "PLAYER_PROP" for leg in open_legs)
+                    else ""
+                )
                 raise UnprocessableError(
-                    f"Parlay {bet_id} still has {open_legs} open legs; "
-                    "legs settle from their games and cannot be graded manually"
+                    f"Parlay {bet_id} still has {len(open_legs)} open legs; "
+                    f"legs settle from their games and cannot be graded manually{hint}"
                 )
             await self._settle_parlay_if_decided(bet_id, force=force)
             refreshed = await self._repo.get_with_grade(bet_id)
@@ -165,7 +176,9 @@ class GraderService:
                 box = await self._statistics.get_box_score(str(bet.game_id))
             except NotFoundError as exc:
                 raise UnprocessableError(f"Box score for game {bet.game_id} is not available yet") from exc
-            resolved = self._resolve_prop_grade(bet, box)
+            resolved = resolve_player_prop(
+                box, bet.player_external_id, bet.stat_type, bet.prop_type, bet.side, bet.line_value
+            )
             if isinstance(resolved, str):
                 raise UnprocessableError(f"Cannot grade prop bet {bet_id}: {resolved}")
             await self._apply_prop_grade(
@@ -268,14 +281,15 @@ class GraderService:
     async def _grade_props(
         self,
         prop_bets: list[PaperBetRecord],
-        game_id: str,
+        box: BoxScore | None,
         home_score: int,
         away_score: int,
         total: int | None,
         margin: int | None,
         game_result_id: str | None,
     ) -> int:
-        """Grade PLAYER_PROP bets for one game from its box score.
+        """Grade PLAYER_PROP bets for one game from its box score (fetched
+        once by grade_game and shared with parlay-leg grading).
 
         TEAM_PROP/GAME_PROP are skipped with a log (v1 implements PLAYER_PROP
         only). A missing box score (404 or upstream failure) leaves every
@@ -287,14 +301,13 @@ class GraderService:
         for bet in prop_bets:
             if bet.market_type != "PLAYER_PROP":
                 logger.info("skipping bet %s: %s grading is not implemented in v1", bet.id, bet.market_type)
-        if not player_props:
-            return 0
-        box = await self._fetch_box_score(game_id)
-        if box is None:
+        if not player_props or box is None:
             return 0
         graded = 0
         for bet in player_props:
-            resolved = self._resolve_prop_grade(bet, box)
+            resolved = resolve_player_prop(
+                box, bet.player_external_id, bet.stat_type, bet.prop_type, bet.side, bet.line_value
+            )
             if isinstance(resolved, str):
                 logger.warning("player prop bet %s stays OPEN: %s", bet.id, resolved)
                 continue
@@ -310,36 +323,6 @@ class GraderService:
             )
             graded += 1 if applied else 0
         return graded
-
-    def _resolve_prop_grade(self, bet: PaperBetRecord, box: BoxScore) -> tuple[GradeStatus, str, float] | str:
-        """Resolve one player prop against a box score.
-
-        Returns (status, description, actual_stat_value), or a reason string
-        when the bet cannot be graded (the caller decides whether that logs
-        and stays OPEN -- event/poller -- or raises a 422 -- manual).
-        """
-        if bet.side is None or not bet.player_external_id or not bet.stat_type:
-            return "bet is missing side/player_external_id/stat_type"
-        extractor = STAT_EXTRACTORS.get(bet.stat_type)
-        if extractor is None:
-            return f"unknown stat_type {bet.stat_type!r}"
-        player = find_player_line(box, bet.player_external_id)
-        if player is None:
-            return f"no box-score player matches slug {bet.player_external_id!r} for game {box.game_id}"
-        try:
-            actual = extractor(player)
-        except (AttributeError, KeyError, TypeError):
-            return f"stat_type {bet.stat_type!r} does not apply to a {box.sport} box score"
-        # Wave 0 placement validation guarantees prop_type on new bets; infer
-        # from the side vocabulary for any row predating it
-        prop_type = bet.prop_type or ("YES_NO" if bet.side in ("YES", "NO") else "OVER_UNDER")
-        try:
-            status, description = grade_player_prop(
-                bet.stat_type, prop_type, bet.side, bet.line_value, actual, player_name=player.player_name
-            )
-        except ValueError as exc:
-            return str(exc)
-        return status, description, actual
 
     async def _apply_prop_grade(
         self,
@@ -394,6 +377,7 @@ class GraderService:
     async def _grade_parlay_legs(
         self,
         legs: list[ParlayLegRecord],
+        box: BoxScore | None,
         home_score: int,
         away_score: int,
         home_team: str | None,
@@ -401,38 +385,63 @@ class GraderService:
         regulation_home_score: int | None = None,
         regulation_away_score: int | None = None,
     ) -> int:
-        """Grade OPEN parlay legs for one game via the same market paths as
-        single bets, then settle any parent left with no OPEN legs. Returns
-        the number of parents settled.
+        """Grade OPEN parlay legs for one game, then settle any parent left
+        with no OPEN legs. Returns the number of parents settled.
 
-        Prop legs cannot exist in v1: placement accepts team markets only
-        (validate_parlay_legs, ADR-028), so grade_bet's ValueError guard
-        below is purely defensive against rows written outside the API."""
+        Score-market legs grade via the same market paths as single bets
+        (grade_bet's ValueError guard is defensive against rows written
+        outside the API). PLAYER_PROP legs (Wave 4) grade from the game's
+        box score -- fetched once by grade_game and shared with single-bet
+        prop grading -- via the same resolve_player_prop core. A missing box
+        score or unmatched player leaves the leg OPEN: the parent keeps
+        waiting, and the fallback poller retries the game on later sweeps
+        (its sweep unions OPEN parlay-leg games). TEAM_PROP/GAME_PROP legs
+        cannot be placed and are skipped with a log."""
         parents: dict[uuid.UUID, None] = {}  # insertion-ordered set
         for leg in legs:
-            settle_home, settle_away = settlement_scores(
-                {
-                    "home_score": home_score,
-                    "away_score": away_score,
-                    "regulation_home_score": regulation_home_score,
-                    "regulation_away_score": regulation_away_score,
-                },
-                leg.league,
-            )
-            try:
-                status, _ = grade_bet(
-                    leg.market_type,
-                    leg.side,
-                    leg.line_value,
-                    settle_home,
-                    settle_away,
-                    home_team,
-                    away_team,
-                    three_way_moneyline=is_three_way_moneyline_league(leg.league) and leg.market_type == "MONEYLINE",
+            if leg.market_type in PROP_MARKETS:
+                if leg.market_type != "PLAYER_PROP":
+                    logger.info(
+                        "skipping parlay leg %s (bet %s): %s grading is not implemented in v1",
+                        leg.id,
+                        leg.bet_id,
+                        leg.market_type,
+                    )
+                    continue
+                if box is None:
+                    continue  # stays OPEN; the poller retries once the box score lands
+                resolved = resolve_player_prop(
+                    box, leg.player_external_id, leg.stat_type, leg.prop_type, leg.side, leg.line_value
                 )
-            except ValueError:
-                logger.warning("cannot grade parlay leg %s (bet %s)", leg.id, leg.bet_id, exc_info=True)
-                continue
+                if isinstance(resolved, str):
+                    logger.warning("player prop parlay leg %s stays OPEN: %s", leg.id, resolved)
+                    continue
+                status = resolved[0]
+            else:
+                settle_home, settle_away = settlement_scores(
+                    {
+                        "home_score": home_score,
+                        "away_score": away_score,
+                        "regulation_home_score": regulation_home_score,
+                        "regulation_away_score": regulation_away_score,
+                    },
+                    leg.league,
+                )
+                try:
+                    status, _ = grade_bet(
+                        leg.market_type,
+                        leg.side,
+                        leg.line_value,
+                        settle_home,
+                        settle_away,
+                        home_team,
+                        away_team,
+                        three_way_moneyline=is_three_way_moneyline_league(leg.league)
+                        and leg.market_type == "MONEYLINE",
+                    )
+                except ValueError:
+                    logger.warning("cannot grade parlay leg %s (bet %s)", leg.id, leg.bet_id, exc_info=True)
+                    continue
             if await self._repo.grade_leg(leg.id, status):
                 parents[leg.bet_id] = None
         settled = 0
