@@ -1,0 +1,19 @@
+{
+  "recommendations": [
+    "eamodio.gitlens",
+    "usernamehw.errorlens",
+    "redhat.vscode-yaml",
+    "ms-azuretools.vscode-docker",
+    "task.vscode-task",
+    "davidanson.vscode-markdownlint",
+    "esbenp.prettier-vscode",
+    "timonwong.shellcheck",
+    "foxundermoon.shell-format",
+    "tamasfe.even-better-toml",
+    "hverlin.mise-vscode",
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "ms-python.debugpy",
+    "charliermarsh.ruff"
+  ]
+}
