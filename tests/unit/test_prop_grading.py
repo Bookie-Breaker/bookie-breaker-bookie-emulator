@@ -13,6 +13,7 @@ from bookie_emulator.core.prop_grading import (
     STAT_EXTRACTORS,
     find_player_line,
     grade_player_prop,
+    resolve_player_prop,
     slugify_player_name,
 )
 
@@ -247,3 +248,18 @@ class TestFindPlayerLine:
     def test_unknown_sport_matches_nothing(self) -> None:
         box = soccer_box(sport="CRICKET")
         assert find_player_line(box, "erling-haaland") is None
+
+
+class TestResolvePlayerProp:
+    def test_side_prop_type_mismatch_returns_reason_string(self) -> None:
+        # grade_player_prop's ValueError surfaces as a stay-OPEN reason, not a raise
+        resolved = resolve_player_prop(soccer_box(), "erling-haaland", "player_shots", "OVER_UNDER", "YES", 2.5)
+        assert resolved == "Cannot grade side YES on an OVER_UNDER prop"
+
+    def test_matched_player_resolves_to_grade_tuple(self) -> None:
+        resolved = resolve_player_prop(soccer_box(), "erling-haaland", "player_shots", "OVER_UNDER", "OVER", 2.5)
+        assert not isinstance(resolved, str)
+        status, description, actual = resolved
+        assert status == "WON"
+        assert actual == 3.0
+        assert "over 2.5" in description

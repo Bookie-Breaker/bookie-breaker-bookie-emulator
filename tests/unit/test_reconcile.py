@@ -109,3 +109,10 @@ class TestGameReconciler:
 
         reconciler = GameReconciler(FailingLines(), FakeRedis())  # type: ignore[arg-type]
         assert await reconciler.resolve(make_game()) is None
+
+    async def test_unparseable_start_queries_without_a_date(self) -> None:
+        lines = FakeLines([snapshot("odds-42", "HOME", "Los Angeles Lakers")])
+        reconciler = GameReconciler(lines, FakeRedis())  # type: ignore[arg-type]
+        game = make_game().model_copy(update={"scheduled_start": "not-a-timestamp"})
+        assert await reconciler.resolve(game) == "odds-42"
+        assert lines.calls[0]["date"] is None
